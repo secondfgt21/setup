@@ -42,6 +42,250 @@ const WEBSITE_SOURCE = {
 };
 
 // ============================================================================
+// INTERACTIVE TERMINAL UI / LOGGER (TERMUX & DESKTOP FRIENDLY)
+// ============================================================================
+const USE_COLOR = !process.env.NO_COLOR;
+const IS_TTY = Boolean(process.stdout.isTTY);
+const C = {
+  reset: USE_COLOR ? '\x1b[0m' : '',
+  bold: USE_COLOR ? '\x1b[1m' : '',
+  dim: USE_COLOR ? '\x1b[90m' : '',
+  cyan: USE_COLOR ? '\x1b[36m' : '',
+  brightCyan: USE_COLOR ? '\x1b[96m' : '',
+  green: USE_COLOR ? '\x1b[32m' : '',
+  brightGreen: USE_COLOR ? '\x1b[92m' : '',
+  yellow: USE_COLOR ? '\x1b[33m' : '',
+  brightYellow: USE_COLOR ? '\x1b[93m' : '',
+  red: USE_COLOR ? '\x1b[31m' : '',
+  brightRed: USE_COLOR ? '\x1b[91m' : '',
+  magenta: USE_COLOR ? '\x1b[35m' : '',
+  blue: USE_COLOR ? '\x1b[34m' : '',
+  brightBlue: USE_COLOR ? '\x1b[94m' : '',
+  white: USE_COLOR ? '\x1b[97m' : '',
+};
+
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+function getBoxWidth() {
+  const cols = process.stdout.columns || 52;
+  return Math.max(38, Math.min(cols - 2, 66));
+}
+
+function stripAnsi(str) {
+  return String(str || '').replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+function fitLine(str, maxLen) {
+  const plain = stripAnsi(str);
+  if (plain.length <= maxLen) return str;
+  return `${plain.slice(0, Math.max(1, maxLen - 1))}…`;
+}
+
+function shortUrl(rawUrl) {
+  const s = String(rawUrl || '').trim();
+  if (!s) return '-';
+  try {
+    const u = new URL(s);
+    const clean = `${u.host}${u.pathname === '/' ? '' : u.pathname}`;
+    return clean.length > 44 ? `${clean.slice(0, 41)}...` : clean;
+  } catch {
+    return s.length > 44 ? `${s.slice(0, 41)}...` : s;
+  }
+}
+
+function formatDuration(ms) {
+  const sec = Math.max(0, ms / 1000);
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}m ${s}s`;
+}
+
+function buildBar(ratio, width = 14) {
+  const clamped = Math.max(0, Math.min(1, ratio));
+  const filled = Math.round(clamped * width);
+  return `${C.brightCyan}${'█'.repeat(filled)}${C.dim}${'░'.repeat(width - filled)}${C.reset}`;
+}
+
+function nowTime() {
+  return new Date().toTimeString().slice(0, 8);
+}
+
+const ui = {
+  _timer: null,
+  _frame: 0,
+  _spinText: '',
+  _spinStart: 0,
+
+  _clearLine() {
+    if (IS_TTY) {
+      process.stdout.write('\r\x1b[2K');
+    }
+  },
+
+  _renderSpin() {
+    if (!IS_TTY || !this._spinText) return;
+    const frame = SPINNER_FRAMES[this._frame % SPINNER_FRAMES.length];
+    this._frame += 1;
+    const elapsed = ((Date.now() - this._spinStart) / 1000).toFixed(1);
+    const maxCols = Math.max(24, (process.stdout.columns || 52) - 12);
+    const label = fitLine(this._spinText, maxCols);
+    process.stdout.write(`\r\x1b[2K${C.brightCyan}${frame}${C.reset} ${C.white}${label}${C.reset} ${C.dim}(${elapsed}s)${C.reset}`);
+  },
+
+  spin(text) {
+    this._spinText = String(text || '');
+    this._spinStart = Date.now();
+    if (!IS_TTY) return;
+    if (!this._timer) {
+      this._timer = setInterval(() => this._renderSpin(), 90);
+      if (this._timer.unref) this._timer.unref();
+    }
+    this._renderSpin();
+  },
+
+  stopSpin() {
+    if (this._timer) {
+      clearInterval(this._timer);
+      this._timer = null;
+    }
+    this._spinText = '';
+    this._clearLine();
+  },
+
+  _print(line) {
+    this._clearLine();
+    process.stdout.write(`${line}\n`);
+    if (IS_TTY && this._spinText) {
+      this._renderSpin();
+    }
+  },
+
+  box(lines, borderColor = C.cyan) {
+    this.stopSpin();
+    const w = getBoxWidth();
+    const inner = w - 4;
+    const top = `${borderColor}┌${'─'.repeat(w - 2)}┐${C.reset}`;
+    const bot = `${borderColor}└${'─'.repeat(w - 2)}┘${C.reset}`;
+    process.stdout.write(`\n${top}\n`);
+    for (const raw of lines) {
+      const plainLen = stripAnsi(raw).length;
+      if (plainLen <= inner) {
+        const pad = ' '.repeat(inner - plainLen);
+        process.stdout.write(`${borderColor}│${C.reset} ${raw}${pad} ${borderColor}│${C.reset}\n`);
+      } else {
+        const clipped = fitLine(stripAnsi(raw), inner);
+        const pad = ' '.repeat(Math.max(0, inner - clipped.length));
+        process.stdout.write(`${borderColor}│${C.reset} ${clipped}${pad} ${borderColor}│${C.reset}\n`);
+      }
+    }
+    process.stdout.write(`${bot}\n`);
+  },
+
+  banner(totalAccounts) {
+    this.box(
+      [
+        `${C.bold}${C.brightCyan}GPAY AUTO-CLOSER & FAMILY CLEANER${C.reset}`,
+        `${C.dim}Total Antrean: ${C.white}${totalAccounts} akun${C.dim}  •  Mode: ${C.brightGreen}${HEADLESS ? 'Headless' : 'UI'}${C.reset}`,
+      ],
+      C.brightCyan
+    );
+  },
+
+  accountHeader(index, total, stats) {
+    const ratio = index / Math.max(1, total);
+    const pct = Math.round(ratio * 100);
+    const bar = buildBar(ratio, 12);
+    this.box(
+      [
+        `${C.bold}${C.white}AKUN [${index + 1}/${total}]${C.reset}  ${bar} ${C.brightCyan}${pct}%${C.reset}`,
+        `${C.dim}Sumber :${C.reset} ${C.white}akun #${index + 1} (accounts.json)${C.reset}`,
+        `${C.dim}Hasil  :${C.reset} ${C.brightGreen}✓ ${stats.success} Sukses${C.reset}  ${C.dim}•${C.reset}  ${C.brightRed}✗ ${stats.failed} Gagal${C.reset}`,
+      ],
+      C.blue
+    );
+  },
+
+  step(tag, msg) {
+    const t = `${C.dim}[${nowTime()}]${C.reset}`;
+    const badge = `${C.bold}${C.brightCyan}[${tag}]${C.reset}`;
+    this._print(`${t} ${badge} ${C.white}${msg}${C.reset}`);
+    this.spin(msg);
+  },
+
+  ok(msg) {
+    this._print(`   ${C.brightGreen}✓${C.reset} ${C.green}${msg}${C.reset}`);
+  },
+
+  sub(msg) {
+    this._print(`   ${C.cyan}▸${C.reset} ${C.dim}${msg}${C.reset}`);
+  },
+
+  info(msg) {
+    this._print(`   ${C.brightBlue}ℹ${C.reset} ${C.cyan}${msg}${C.reset}`);
+  },
+
+  warn(msg) {
+    this._print(`   ${C.brightYellow}⚠${C.reset} ${C.yellow}${msg}${C.reset}`);
+  },
+
+  fail(msg) {
+    this.stopSpin();
+    this._print(`   ${C.brightRed}✖ ${msg}${C.reset}`);
+  },
+
+  async countdown(ms, label) {
+    const endAt = Date.now() + ms;
+    if (!IS_TTY) {
+      this._print(`   ${C.yellow}⏳ ${label} (${Math.ceil(ms / 1000)}s)${C.reset}`);
+      await new Promise((r) => setTimeout(r, ms));
+      return;
+    }
+    const wasSpinning = this._spinText;
+    if (this._timer) {
+      clearInterval(this._timer);
+      this._timer = null;
+    }
+    while (Date.now() < endAt) {
+      const remMs = Math.max(0, endAt - Date.now());
+      const ratio = 1 - remMs / Math.max(1, ms);
+      const bar = buildBar(ratio, 10);
+      const remSec = (remMs / 1000).toFixed(1);
+      process.stdout.write(`\r\x1b[2K   ${C.brightYellow}⏳${C.reset} ${C.yellow}${label}${C.reset} ${bar} ${C.white}${remSec}s${C.reset}`);
+      await new Promise((r) => setTimeout(r, Math.min(200, remMs)));
+    }
+    this._clearLine();
+    if (wasSpinning) {
+      this.spin(wasSpinning);
+    }
+  },
+
+  accountDone(index, total, ok, elapsedMs, detail) {
+    this.stopSpin();
+    const dur = formatDuration(elapsedMs);
+    if (ok) {
+      this._print(`\n${C.brightGreen}✔ AKUN [${index + 1}/${total}] SELESAI${C.reset} ${C.dim}(${dur}) — ${detail}${C.reset}`);
+    } else {
+      this._print(`\n${C.brightRed}✖ AKUN [${index + 1}/${total}] GAGAL${C.reset} ${C.dim}(${dur}) — ${detail}${C.reset}`);
+    }
+  },
+
+  summary(total, stats, totalMs) {
+    const bar = buildBar(1, 14);
+    this.box(
+      [
+        `${C.bold}${C.brightGreen}RINGKASAN EKSEKUSI${C.reset}  ${bar} ${C.brightCyan}100%${C.reset}`,
+        `${C.dim}Total Akun :${C.reset} ${C.white}${total}${C.reset}  ${C.dim}(${formatDuration(totalMs)})${C.reset}`,
+        `${C.brightGreen}✓ Sukses   :${C.reset} ${stats.success}  ${C.dim}(Tutup: ${stats.closed}, Kosong: ${stats.noProfile})${C.reset}`,
+        `${C.brightRed}✗ Gagal    :${C.reset} ${stats.failed}`,
+        `${C.cyan}★ Family   :${C.reset} ${stats.familyMembersRemoved} anggota dihapus`,
+      ],
+      stats.failed === 0 ? C.brightGreen : C.yellow
+    );
+  },
+};
+
+// ============================================================================
 // KONVERTER BASE32 SECRET KEY -> 6-DIGIT GOOGLE AUTHENTICATOR TOTP (RFC 6238)
 // ============================================================================
 function extractBase32Secret(input) {
@@ -169,8 +413,8 @@ async function fetchFromSourceTab(sourcePage, targetPage, kind) {
         .catch(() => 30);
 
       if (remSec <= 4) {
-        console.log(`   -> Sisa waktu OTP di website ${remSec}s, menunggu siklus 30s baru...`);
-        await sourcePage.waitForTimeout((remSec + 2) * 1000);
+        ui.spin(`Menunggu siklus OTP baru di website (${remSec}s)...`);
+        await ui.countdown((remSec + 2) * 1000, 'Siklus OTP baru');
       }
 
       // Coba klik tombol "SALIN KODE OTP" jika tersedia
@@ -312,7 +556,7 @@ async function fetchFromSourceTab(sourcePage, targetPage, kind) {
   if (!extracted) {
     throw new Error(`Gagal mengambil "${kind}" dari website sumber (link accounts.json disensor). Isi Selector ${kind} di Konfigurasi jika perlu.`);
   }
-  console.log(`   -> Berhasil ambil ${kind} dari Tab Website (disensor)`);
+  ui.ok(`Ambil ${kind} dari Tab Website (disensor)`);
   return extracted;
 }
 
@@ -333,6 +577,14 @@ function resolveChromiumExecutable() {
     if (fs.existsSync(candidate)) {
       return candidate;
     }
+  }
+  try {
+    const pwPath = chromium.executablePath();
+    if (pwPath && fs.existsSync(pwPath)) {
+      return pwPath;
+    }
+  } catch {
+    // Ignore if playwright-core cannot resolve default executable
   }
   throw new Error(
     'Binary Chromium tidak ditemukan! Jalankan setup-termux.sh atau set CHROMIUM_PATH.'
@@ -413,34 +665,32 @@ async function saveDiagnosticScreenshot(page, account, index, currentStep) {
   const localShot = path.resolve(process.cwd(), fileName);
 
   try {
+    ui.spin('Menyimpan screenshot diagnostik...');
     await page.screenshot({ path: localShot, fullPage: true });
-    console.log(`[SCREENSHOT] Nama file (12 digit): ${fileName}`);
-    console.log(`[SCREENSHOT] Lokasi internal     : ${localShot}`);
+    ui.warn(`Screenshot: ${fileName}`);
+    ui.sub(`Lokasi: ${localShot}`);
 
     if (SAVE_ERROR_TO_SDCARD) {
       const downloadDir = resolveDownloadDir();
       if (downloadDir) {
         const publicShot = path.join(downloadDir, fileName);
         fs.copyFileSync(localShot, publicShot);
-        console.log(`[SCREENSHOT] Tersalin ke Download: ${publicShot}`);
+        ui.ok(`Tersalin ke Download: ${publicShot}`);
       } else {
-        console.log('[SCREENSHOT] Folder /storage/emulated/0/Download belum bisa diakses. Jalankan "termux-setup-storage" sekali di Termux agar screenshot otomatis masuk Download HP.');
+        ui.warn('Folder Download belum bisa diakses. Jalankan "termux-setup-storage" di Termux.');
       }
     }
   } catch (shotErr) {
-    console.log(`[SCREENSHOT] Gagal mengambil screenshot: ${shotErr.message}`);
+    ui.warn(`Gagal mengambil screenshot: ${shotErr.message}`);
   }
 
   try {
     const title = await page.title().catch(() => '-');
-    const frames = page.frames().map((f, i) => `[${i}] ${f.url()}`);
-    console.log(`[DEBUG] Gagal pada langkah : ${currentStep}`);
-    console.log(`[DEBUG] URL terakhir       : ${page.url()}`);
-    console.log(`[DEBUG] Judul halaman      : ${title}`);
-    console.log(`[DEBUG] Frame aktif (${frames.length})   :`);
-    for (const fUrl of frames) {
-      console.log(`        ${fUrl}`);
-    }
+    const frames = page.frames().map((f, i) => `[${i}] ${shortUrl(f.url())}`);
+    ui.sub(`Langkah gagal : ${currentStep}`);
+    ui.sub(`URL terakhir  : ${shortUrl(page.url())}`);
+    ui.sub(`Judul halaman : ${title}`);
+    ui.sub(`Frame aktif   : ${frames.length} (${frames.slice(0, 3).join(', ')})`);
 
     const snippets = [];
     for (const scope of [page, ...page.frames()]) {
@@ -450,7 +700,7 @@ async function saveDiagnosticScreenshot(page, account, index, currentStep) {
       if (txt) snippets.push(txt.slice(0, 260));
     }
     if (snippets.length > 0) {
-      console.log(`[DEBUG] Cuplikan teks layar: ${snippets.join(' | ').slice(0, 500)}`);
+      ui.sub(`Teks layar    : ${snippets.join(' | ').slice(0, 220)}`);
     }
   } catch {
     // Abaikan error logging tambahan
@@ -475,7 +725,7 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
     const tryAnotherBtn = page.locator(tryAnotherSelector).first();
 
     if (await tryAnotherBtn.isVisible().catch(() => false)) {
-      console.log('   -> Mengklik "Coba cara lain" untuk memilih Google Authenticator...');
+      ui.sub('Klik "Coba cara lain" untuk memilih Google Authenticator...');
       await tryAnotherBtn.click();
       await page.waitForTimeout(1800);
     }
@@ -498,8 +748,9 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
   for (let attempt = 0; attempt < 2; attempt++) {
     const { otp, remaining, serverIso } = await getOtpFn();
     const offsetSec = Math.round((getClockOffsetFn ? getClockOffsetFn() : 0) / 1000);
-    console.log(`   -> Sinkronisasi waktu server Google: ${serverIso} (selisih jam HP: ${offsetSec}s)`);
-    console.log(`   -> Memasukkan kode OTP 6-digit: ${otp} (berlaku ${remaining}s)`);
+    ui.sub(`Sinkronisasi waktu Google: ${serverIso.slice(11, 19)}Z (selisih ${offsetSec}s)`);
+    ui.ok(`Memasukkan OTP 6-digit: ${C.bold}${otp}${C.reset}${C.green} (sisa ${remaining}s)`);
+    ui.spin('Mengirim & memverifikasi kode OTP...');
 
     await totpInput.click();
     await totpInput.fill('');
@@ -523,7 +774,7 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
 
     if (moved) {
       await page.waitForTimeout(1500);
-      console.log('   -> URL setelah submit OTP:', page.url());
+      ui.ok(`Verifikasi OTP lolos -> ${shortUrl(page.url())}`);
       return;
     }
 
@@ -532,17 +783,16 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
       .first();
     if (await otpError.isVisible().catch(() => false)) {
       const errMsg = (await otpError.innerText().catch(() => 'Kode OTP ditolak')).trim();
-      console.log(`   -> Peringatan Google OTP: "${errMsg}"`);
+      ui.warn(`Peringatan OTP: "${errMsg}"`);
       if (attempt === 0) {
-        console.log('   -> Menunggu siklus 30 detik berikutnya untuk coba ulang...');
-        await page.waitForTimeout((Math.min(remaining, 30) + 2) * 1000);
+        await ui.countdown((Math.min(remaining, 30) + 2) * 1000, 'Tunggu siklus OTP baru');
         continue;
       }
       throw new Error(`OTP Google Authenticator ditolak Google ("${errMsg}"). Cek Base32 Secret Key atau mode Tab Website.`);
     }
   }
 
-  console.log('   -> URL setelah submit OTP:', page.url());
+  ui.sub(`URL setelah submit OTP: ${shortUrl(page.url())}`);
 }
 
 // ============================================================================
@@ -550,8 +800,9 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
 // ============================================================================
 async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getClockOffsetFn, setStepFn) {
   const FAMILY_URL = 'https://myaccount.google.com/family/details';
+  let removedCount = 0;
   setStepFn('Langkah 13: Cek & Kosongkan Google Family');
-  console.log('\n[13] Membuka halaman Google Family:', FAMILY_URL);
+  ui.step('13', `Membuka Google Family (${shortUrl(FAMILY_URL)})`);
   await page.goto(FAMILY_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
   await page.waitForTimeout(2000);
@@ -580,8 +831,8 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
   // Tunggu tampilan Family termuat
   for (let w = 0; w < 10; w++) {
     if (await isEmptyFamilyScreen()) {
-      console.log(`[INFO] Family pada ${accountLabel} sudah kosong (belum ada grup keluarga).`);
-      return;
+      ui.info(`Family ${accountLabel} sudah kosong (belum ada grup)`);
+      return { removed: removedCount };
     }
     const hasList = await findVisibleLocatorInAllFrames(page, (scope) =>
       scope.getByText(/keluarga anda di google|your family on google|pengelola akun keluarga|family manager/i)
@@ -591,8 +842,8 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
   }
 
   if (await isEmptyFamilyScreen()) {
-    console.log(`[INFO] Family pada ${accountLabel} sudah kosong (belum ada grup keluarga).`);
-    return;
+    ui.info(`Family ${accountLabel} sudah kosong (belum ada grup)`);
+    return { removed: removedCount };
   }
 
   for (let round = 0; round < 10; round++) {
@@ -602,8 +853,8 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
     }
 
     if (await isEmptyFamilyScreen()) {
-      console.log(`[SELESAI] Family pada ${accountLabel} sudah kosong.`);
-      return;
+      ui.ok(`Family ${accountLabel} sudah kosong`);
+      return { removed: removedCount };
     }
 
     // Cari baris email yang memiliki label "Anggota" / "Member" (bukan "Pengelola akun keluarga")
@@ -647,20 +898,19 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
         scope.getByText(managerRoleRegex)
       );
       if (hasManager) {
-        console.log(
-          `[SELESAI] Family pada ${accountLabel} berhasil dikosongkan — tersisa 1 orang (Pengelola akun keluarga).`
-        );
-        return;
+        ui.ok(`Family bersih — tersisa 1 Pengelola akun keluarga`);
+        return { removed: removedCount };
       }
       if (await isEmptyFamilyScreen()) {
-        console.log(`[INFO] Family pada ${accountLabel} sudah kosong.`);
-        return;
+        ui.info(`Family ${accountLabel} sudah kosong`);
+        return { removed: removedCount };
       }
       throw new Error('Daftar anggota Family tidak terbaca di halaman family/details.');
     }
 
     setStepFn(`Langkah 13: Hapus Anggota Family (${memberLabelText})`);
-    console.log(`   -> [Family #${round + 1}] Klik anggota berlabel Anggota: "${memberLabelText}"`);
+    ui.sub(`[Family #${round + 1}] Pilih anggota: "${memberLabelText}"`);
+    ui.spin(`Membuka detail anggota Family #${round + 1}...`);
     const memberBtn = page.locator('[data-bot-family-member="1"]').first();
     await memberBtn.scrollIntoViewIfNeeded().catch(() => {});
     try {
@@ -692,7 +942,7 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
       throw new Error(`Tombol "Hapus anggota" tidak ditemukan untuk "${memberLabelText}".`);
     }
 
-    console.log('   -> Klik tombol "Hapus anggota"...');
+    ui.sub('Klik tombol "Hapus anggota"...');
     await removeMemberBtn.locator.scrollIntoViewIfNeeded().catch(() => {});
     await removeMemberBtn.locator.click();
     await page.waitForTimeout(2000);
@@ -719,7 +969,7 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
       // Cek apakah form Password muncul (Pict 3)
       const pwdLoc = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator(pwdSelector));
       if (pwdLoc) {
-        console.log('   -> [Smart Auth] Form password terdeteksi, mengisi password...');
+        ui.sub('[Smart Auth] Form password terdeteksi, mengisi password...');
         await pwdLoc.locator.fill(await getPassword());
         const nextBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
           scope.locator('#passwordNext, button:has-text("Berikutnya"), button:has-text("Next")')
@@ -740,7 +990,7 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
         (await page.locator(tryAnotherSelector).first().isVisible().catch(() => false));
 
       if (totpVisible || tryOtherVisible) {
-        console.log('   -> [Smart Auth] Form Authenticator OTP terdeteksi, mengisi kode OTP...');
+        ui.sub('[Smart Auth] Form Authenticator OTP terdeteksi, mengisi OTP...');
         await submitTotpChallenge(page, getOtp, getClockOffsetFn);
         await page.waitForTimeout(2500);
         continue;
@@ -774,13 +1024,15 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
     }
 
     if (DRY_RUN) {
-      console.log(`   -> [DRY_RUN AKTIF] Berhenti sebelum klik final Hapus untuk "${memberLabelText}".`);
-      return;
+      ui.warn(`[DRY_RUN] Berhenti sebelum klik final Hapus "${memberLabelText}"`);
+      return { removed: removedCount };
     }
 
-    console.log(`   -> Klik konfirmasi akhir "Hapus" untuk "${memberLabelText}"...`);
+    ui.sub(`Klik konfirmasi akhir "Hapus" untuk "${memberLabelText}"...`);
     await finalRemoveBtn.locator.scrollIntoViewIfNeeded().catch(() => {});
     await finalRemoveBtn.locator.click();
+    removedCount += 1;
+    ui.ok(`Anggota #${round + 1} berhasil dihapus dari Family`);
     await page.waitForTimeout(3000);
 
     // Tunggu kembali ke tampilan daftar family/details
@@ -789,9 +1041,11 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
       .catch(() => {});
     await page.waitForTimeout(2000);
   }
+  return { removed: removedCount };
 }
 
-async function processAccount(account, index, total) {
+async function processAccount(account, index, total, stats) {
+  const accountStart = Date.now();
   const accountUrl =
     typeof account === 'string'
       ? account.trim()
@@ -800,9 +1054,8 @@ async function processAccount(account, index, total) {
   const resolvedUrl = accountUrl || WEBSITE_SOURCE.url;
   const accountLabel = `akun #${index + 1} yang diisi di accounts.json`;
 
-  console.log(`\n==========================================================`);
-  console.log(`[${index + 1}/${total}] Memproses ${accountLabel}`);
-  console.log(`==========================================================`);
+  ui.accountHeader(index, total, stats);
+  ui.spin(`Menyiapkan browser Chromium untuk akun #${index + 1}...`);
 
   const executablePath = resolveChromiumExecutable();
   const browser = await chromium.launch({
@@ -862,7 +1115,7 @@ async function processAccount(account, index, total) {
       throw new Error(`Link website untuk ${accountLabel} tidak valid.`);
     }
     sourcePage = await context.newPage();
-    console.log(`[TAB-1] Membuka link ${accountLabel} (URL disensor)`);
+    ui.step('TAB-1', `Membuka link akun #${index + 1} (URL disensor)`);
     await sourcePage.goto(resolvedUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await sourcePage.waitForTimeout(2000);
   }
@@ -905,8 +1158,7 @@ async function processAccount(account, index, total) {
     }
     let res = generateTOTP(account.totpSecret, 30, 6, googleClockOffsetMs);
     if (res.remaining <= 5) {
-      console.log(`   -> Sisa waktu OTP ${res.remaining}s, menunggu siklus 30 detik baru...`);
-      await page.waitForTimeout((res.remaining + 1) * 1000);
+      await ui.countdown((res.remaining + 1) * 1000, 'Siklus OTP baru');
       res = generateTOTP(account.totpSecret, 30, 6, googleClockOffsetMs);
     }
     return res;
@@ -918,16 +1170,16 @@ async function processAccount(account, index, total) {
   try {
     // [LANGKAH 1 & 2] Masuk ke URL settings & tunggu redirect login
     currentStep = 'Langkah 1-2: Buka Settings & Redirect Login';
-    console.log('[1-2] Membuka halaman settings Google Payments...');
+    ui.step('01-02', 'Membuka Google Payments Settings...');
     await page.goto(SETTINGS_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await page.waitForTimeout(STEP_DELAY_MS);
 
     if (page.url().includes('accounts.google.com')) {
-      console.log('   -> Redirect terdeteksi ke halaman login:', page.url());
+      ui.sub(`Redirect login: ${shortUrl(page.url())}`);
 
       // [LANGKAH 3] Masukkan Email
       currentStep = 'Langkah 3: Input Email';
-      console.log('[3] Memasukkan email...');
+      ui.step('03', 'Memasukkan email...');
       const emailValue = await getEmail();
       const emailInput = page.locator('input[type="email"], #identifierId').first();
       await emailInput.waitFor({ state: 'visible', timeout: 25000 });
@@ -945,7 +1197,7 @@ async function processAccount(account, index, total) {
 
       // [LANGKAH 4] Masukkan Password
       currentStep = 'Langkah 4: Input Password';
-      console.log('[4] Memasukkan password...');
+      ui.step('04', 'Memasukkan password...');
       const pwdValue = await getPassword();
       const pwdInput = page
         .locator('input[name="Passwd"]:not([aria-hidden="true"]), input[type="password"]:not([name="hiddenPassword"]):not([aria-hidden="true"])')
@@ -957,14 +1209,14 @@ async function processAccount(account, index, total) {
 
       // [LANGKAH 5] Masukkan OTP Google Authenticator
       currentStep = 'Langkah 5: Verifikasi Google Authenticator OTP';
-      console.log('[5] Memproses verifikasi Google Authenticator...');
+      ui.step('05', 'Verifikasi Google Authenticator OTP...');
       await submitTotpChallenge(page, getOtp, () => googleClockOffsetMs);
       await page.waitForTimeout(3000);
     }
 
     // [LANGKAH 6] Lewati pop-up (Set a home address, Passkey, Face ID, dll) sampai masuk Settings
     currentStep = 'Langkah 6: Lewati Pop-up Pasca Login';
-    console.log('[6] Mengecek & melewati pop-up pasca login...');
+    ui.step('06', 'Mengecek & melewati pop-up pasca login...');
     const primarySkipRegex =
       /\b(skip|lewati|lain kali|not now|nanti saja|tidak sekarang|lain kali saja|no thanks|tidak, terima kasih|jangan aktifkan|don['’]t turn on|skip for now|lewati sekarang)\b/i;
     const secondarySkipRegex =
@@ -1005,7 +1257,7 @@ async function processAccount(account, index, total) {
 
       if (foundSkip) {
         const label = (await foundSkip.locator.innerText().catch(() => 'Skip')).trim() || 'Skip';
-        console.log(`   -> Melewati pop-up (${currentUrl.split('?')[0]}) dengan klik: "${label}"`);
+        ui.sub(`Lewati pop-up (${shortUrl(currentUrl)}) -> "${label}"`);
         await foundSkip.locator.scrollIntoViewIfNeeded().catch(() => {});
         try {
           await foundSkip.locator.click({ timeout: 5000 });
@@ -1025,21 +1277,21 @@ async function processAccount(account, index, total) {
 
     if (page.url().includes('accounts.google.com') || page.url().includes('gds.google.com')) {
       throw new Error(
-        `Login/pop-up belum terlewati (masih tertahan di ${page.url()}). Cek screenshot 12-digit di /storage/emulated/0/Download.`
+        `Login/pop-up belum terlewati (masih tertahan di ${shortUrl(page.url())}). Cek screenshot 12-digit.`
       );
     }
 
     if (!page.url().includes('/gp/w/u/0/home/settings')) {
-      console.log('   -> Mengarahkan ulang ke halaman settings target...');
+      ui.sub('Mengarahkan ulang ke halaman settings target...');
       await page.goto(SETTINGS_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
     }
     await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     await page.waitForTimeout(3000);
-    console.log('   -> URL halaman settings saat ini:', page.url());
+    ui.sub(`Halaman aktif: ${shortUrl(page.url())}`);
 
     // [LANGKAH 7] Tunggu konten settings/iframe termuat, cek apakah akun tidak punya profil pembayaran, lalu scroll & cari "Tutup profil pembayaran"
     currentStep = 'Langkah 7: Cari & Klik Tutup Profil Pembayaran';
-    console.log('[7] Menunggu konten settings termuat & memeriksa status profil pembayaran...');
+    ui.step('07', 'Memeriksa status profil pembayaran...');
 
     const noProfileRegex =
       /tambahkan metode pembayaran|nikmati pembayaran yang cepat dan aman|add a payment method|enjoy fast and secure payments/i;
@@ -1059,7 +1311,7 @@ async function processAccount(account, index, total) {
         scope.getByText(noProfileRegex)
       );
       if (hasNoProfile) {
-        console.log(`[INFO] ${accountLabel} tidak memiliki profil pembayaran ("Tambahkan metode pembayaran"). Lanjut cek Family...`);
+        ui.info(`Akun #${index + 1} tidak punya profil pembayaran. Lanjut cek Family...`);
         paymentsProfileCleared = true;
         break;
       }
@@ -1094,7 +1346,7 @@ async function processAccount(account, index, total) {
           scope.getByText(noProfileRegex)
         );
         if (noProfileFallback) {
-          console.log(`[INFO] ${accountLabel} tidak memiliki profil pembayaran ("Tambahkan metode pembayaran"). Lanjut cek Family...`);
+          ui.info(`Akun #${index + 1} tidak punya profil pembayaran. Lanjut cek Family...`);
           paymentsProfileCleared = true;
           break;
         }
@@ -1102,7 +1354,7 @@ async function processAccount(account, index, total) {
     }
 
     if (!paymentsProfileCleared && !foundCloseLink) {
-      throw new Error('Tombol "Tutup profil pembayaran" tidak ditemukan (cek screenshot 12-digit untuk melihat posisi layar terakhir).');
+      throw new Error('Tombol "Tutup profil pembayaran" tidak ditemukan (cek screenshot 12-digit).');
     }
 
     if (!paymentsProfileCleared) {
@@ -1112,11 +1364,11 @@ async function processAccount(account, index, total) {
 
     await foundCloseLink.locator.scrollIntoViewIfNeeded();
     await foundCloseLink.locator.click();
-    console.log('   -> Berhasil klik "Tutup profil pembayaran".');
+    ui.ok('Klik "Tutup profil pembayaran"');
 
     // [LANGKAH 8 & 9] Deteksi apakah Google membuka jendela pop-up baru ("A new window will appear...") atau redirect langsung
     currentStep = 'Langkah 8-9: Verifikasi Ulang Password';
-    console.log('[8-9] Menunggu jendela pop-up atau halaman verifikasi ulang password...');
+    ui.step('08-09', 'Menunggu verifikasi ulang password...');
     const pwdSelector =
       'input[name="Passwd"]:not([aria-hidden="true"]), input[type="password"]:not([name="hiddenPassword"]):not([aria-hidden="true"])';
     const warningRegex =
@@ -1130,14 +1382,14 @@ async function processAccount(account, index, total) {
       const newTab = context.pages().find((p) => !pagesBeforeClose.has(p) && !p.isClosed());
       if (newTab) {
         authPage = newTab;
-        console.log('   -> Jendela pop-up verifikasi Google terdeteksi:', authPage.url() || '(memuat...)');
+        ui.sub(`Pop-up verifikasi terdeteksi: ${shortUrl(authPage.url()) || '(memuat...)'}`);
         break;
       }
 
       // Cek 2: Tab utama langsung redirect ke accounts.google.com
       if (page.url().includes('accounts.google.com')) {
         authPage = page;
-        console.log('   -> Redirect verifikasi ulang pada tab utama:', page.url());
+        ui.sub(`Redirect re-auth tab utama: ${shortUrl(page.url())}`);
         break;
       }
 
@@ -1145,7 +1397,7 @@ async function processAccount(account, index, total) {
       const inlinePwd = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator(pwdSelector));
       if (inlinePwd) {
         authPage = page;
-        console.log('   -> Form password re-auth terdeteksi di halaman/iframe yang sama.');
+        ui.sub('Form password re-auth terdeteksi inline.');
         break;
       }
 
@@ -1153,7 +1405,7 @@ async function processAccount(account, index, total) {
       const alreadyWarning = await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(warningRegex));
       if (alreadyWarning) {
         skipReAuth = true;
-        console.log('   -> Langsung masuk modal konfirmasi tanpa re-auth ulang.');
+        ui.sub('Langsung masuk modal konfirmasi tanpa re-auth.');
         break;
       }
 
@@ -1226,12 +1478,12 @@ async function processAccount(account, index, total) {
           .isVisible()
           .catch(() => false))
       ) {
-        console.log('   -> Verifikasi TOTP tambahan terdeteksi di jendela re-auth, memasukkan OTP...');
+        ui.sub('Verifikasi TOTP tambahan di jendela re-auth...');
         await submitTotpChallenge(authPage, getOtp, () => googleClockOffsetMs);
       }
 
       if (authPage !== page) {
-        console.log('   -> Menunggu jendela pop-up verifikasi tertutup otomatis...');
+        ui.sub('Menunggu jendela pop-up verifikasi tertutup otomatis...');
         await authPage.waitForEvent('close', { timeout: 25000 }).catch(() => {});
         activeDebugPage = page;
         await page.bringToFront().catch(() => {});
@@ -1243,7 +1495,7 @@ async function processAccount(account, index, total) {
 
     // [LANGKAH 10] Tunggu pop-up "Akses ke layanan akan seketika berubah" & scroll ke paling bawah
     currentStep = 'Langkah 10: Tunggu Pop-up Akses ke Layanan & Scroll Bawah';
-    console.log('[10] Menunggu pop-up "Akses ke layanan akan seketika berubah"...');
+    ui.step('10', 'Menunggu modal konfirmasi penutupan...');
 
     let modalFound = null;
     for (let waitTry = 0; waitTry < 20; waitTry++) {
@@ -1258,13 +1510,13 @@ async function processAccount(account, index, total) {
       throw new Error('Pop-up "Akses ke layanan akan seketika berubah" tidak muncul dalam batas waktu.');
     }
 
-    console.log('   -> Pop-up terdeteksi, melakukan scroll ke paling bawah modal...');
+    ui.sub('Modal terdeteksi, scroll ke paling bawah...');
     await scrollAllFramesToBottom(page);
     await page.waitForTimeout(1200);
 
     // [LANGKAH 11] Pilih alasan "Saya tidak perlu profil ini lagi"
     currentStep = 'Langkah 11: Pilih Alasan Penutupan';
-    console.log('[11] Memilih alasan "Saya tidak perlu profil ini lagi"...');
+    ui.step('11', 'Memilih alasan "Saya tidak perlu profil ini lagi"...');
     const reasonTextRegex =
       /saya tidak perlu profil ini lagi|i don['’]t need this profile anymore|i no longer need this profile/i;
 
@@ -1294,7 +1546,7 @@ async function processAccount(account, index, total) {
 
     // [LANGKAH 12] Klik tombol final "Tutup profil pembayaran"
     currentStep = 'Langkah 12: Klik Final Tutup Profil Pembayaran';
-    console.log('[12] Memproses klik tombol akhir "Tutup profil pembayaran"...');
+    ui.step('12', 'Mengirim konfirmasi akhir tutup profil...');
     await scrollAllFramesToBottom(page);
 
     let finalSubmitBtn =
@@ -1313,7 +1565,7 @@ async function processAccount(account, index, total) {
           .filter({ hasText: /^\s*(continue|lanjutkan)\s*$/i })
       );
       if (continueBtn) {
-        console.log('   -> Klik tombol "Continue/Lanjutkan" menuju konfirmasi akhir...');
+        ui.sub('Klik tombol "Continue/Lanjutkan" menuju konfirmasi akhir...');
         await continueBtn.locator.scrollIntoViewIfNeeded().catch(() => {});
         await continueBtn.locator.click();
         await page.waitForTimeout(1800);
@@ -1334,7 +1586,7 @@ async function processAccount(account, index, total) {
     }
 
     if (DRY_RUN) {
-      console.log('   -> [DRY_RUN AKTIF] Berhenti sebelum klik final. Semua langkah sebelumnya sukses!');
+      ui.warn('[DRY_RUN] Berhenti sebelum klik final Tutup Profil Pembayaran');
     } else {
       await finalSubmitBtn.locator.scrollIntoViewIfNeeded().catch(() => {});
       try {
@@ -1346,13 +1598,13 @@ async function processAccount(account, index, total) {
       }
       await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
       await page.waitForTimeout(5000);
-      console.log(`[SELESAI] Profil pembayaran untuk ${accountLabel} berhasil ditutup!`);
+      ui.ok('Profil pembayaran berhasil ditutup!');
     }
     } // akhir blok if (!paymentsProfileCleared)
 
     // [LANGKAH 13] Kosongkan Google Family setelah profil pembayaran ditutup atau memang kosong
     activeDebugPage = page;
-    await cleanupGoogleFamily(
+    const familyRes = await cleanupGoogleFamily(
       page,
       accountLabel,
       getPassword,
@@ -1362,11 +1614,25 @@ async function processAccount(account, index, total) {
         currentStep = s;
       }
     );
+
+    stats.success += 1;
+    if (paymentsProfileCleared) {
+      stats.noProfile += 1;
+    } else if (!DRY_RUN) {
+      stats.closed += 1;
+    }
+    stats.familyMembersRemoved += familyRes?.removed || 0;
+
+    const statusDetail = `${paymentsProfileCleared ? 'Tanpa profil' : 'Profil ditutup'} • Family -${familyRes?.removed || 0}`;
+    ui.accountDone(index, total, true, Date.now() - accountStart, statusDetail);
   } catch (err) {
-    console.error(`[GAGAL] Error pada ${accountLabel}:`, err.message);
+    stats.failed += 1;
+    ui.fail(`Error akun #${index + 1}: ${err.message}`);
     const targetShotPage = activeDebugPage && !activeDebugPage.isClosed() ? activeDebugPage : page;
     await saveDiagnosticScreenshot(targetShotPage, account, index, currentStep);
+    ui.accountDone(index, total, false, Date.now() - accountStart, currentStep);
   } finally {
+    ui.stopSpin();
     await browser.close();
   }
 }
@@ -1382,13 +1648,33 @@ async function main() {
     throw new Error('accounts.json harus berisi minimal 1 akun atau link URL.');
   }
 
+  const stats = {
+    success: 0,
+    failed: 0,
+    closed: 0,
+    noProfile: 0,
+    familyMembersRemoved: 0,
+  };
+  const startedAt = Date.now();
+
+  process.on('SIGINT', () => {
+    ui.stopSpin();
+    ui.warn('Proses dihentikan oleh pengguna (SIGINT).');
+    process.exit(130);
+  });
+
+  ui.banner(accounts.length);
+
   for (let i = 0; i < accounts.length; i++) {
-    await processAccount(accounts[i], i, accounts.length);
+    await processAccount(accounts[i], i, accounts.length, stats);
   }
+
+  ui.summary(accounts.length, stats, Date.now() - startedAt);
 }
 
 main().catch((err) => {
-  console.error('Fatal error:', err);
+  ui.stopSpin();
+  ui.fail(`Fatal error: ${err.message || err}`);
   process.exit(1);
 });
 

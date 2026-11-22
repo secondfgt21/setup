@@ -2,8 +2,14 @@
   "name": "gpay-closer",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.mjs",
   "scripts": {
+    "dev": "node server.mjs",
+    "build": "node --check server.mjs && node --check bot.mjs && node --check bot2.mjs",
+    "start": "node server.mjs",
+    "lint": "node --check server.mjs && node --check bot.mjs && node --check bot2.mjs",
+    "bot": "node bot.mjs",
+    "bot2": "node bot2.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

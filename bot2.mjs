@@ -40,6 +40,14 @@ function resolveChromiumExecutable() {
       return candidate;
     }
   }
+  try {
+    const pwPath = chromium.executablePath();
+    if (pwPath && fs.existsSync(pwPath)) {
+      return pwPath;
+    }
+  } catch {
+    // Ignore if playwright-core cannot resolve default executable
+  }
   throw new Error('Binary Chromium tidak ditemukan! Install Chromium Termux atau set CHROMIUM_PATH.');
 }
 
