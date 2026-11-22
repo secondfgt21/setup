@@ -248,7 +248,18 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       if (name === 'accounts.json') {
-        JSON.parse(content);
+        try {
+          JSON.parse(content);
+        } catch (jsonErr) {
+          const lines = content
+            .trim()
+            .split(/\r?\n/)
+            .map((l) => l.trim())
+            .filter((l) => l && !l.startsWith('#') && !l.startsWith('//'));
+          if (lines.length === 0 || !lines.every((l) => l.includes('---') || /^https?:\/\//i.test(l))) {
+            throw jsonErr;
+          }
+        }
       }
       fs.writeFileSync(path.resolve(ROOT_DIR, name), content, 'utf-8');
       appendLog(`Saved ${name}`);

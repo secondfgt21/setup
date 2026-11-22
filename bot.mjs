@@ -192,14 +192,14 @@ const ui = {
     );
   },
 
-  accountHeader(index, total, stats) {
+  accountHeader(index, total, stats, sourceText = `akun #${index + 1} (accounts.json)`) {
     const ratio = index / Math.max(1, total);
     const pct = Math.round(ratio * 100);
     const bar = buildBar(ratio, 12);
     this.box(
       [
         `${C.bold}${C.white}AKUN [${index + 1}/${total}]${C.reset}  ${bar} ${C.brightCyan}${pct}%${C.reset}`,
-        `${C.dim}Sumber :${C.reset} ${C.white}akun #${index + 1} (accounts.json)${C.reset}`,
+        `${C.dim}Sumber :${C.reset} ${C.white}${sourceText}${C.reset}`,
         `${C.dim}Hasil  :${C.reset} ${C.brightGreen}✓ ${stats.success} Sukses${C.reset}  ${C.dim}•${C.reset}  ${C.brightRed}✗ ${stats.failed} Gagal${C.reset}`,
       ],
       C.blue
@@ -329,7 +329,8 @@ function base32ToBuffer(base32) {
 }
 
 function generateTOTP(secret, period = 30, digits = 6, clockOffsetMs = 0) {
-  const key = base32ToBuffer(secret);
+  const cleaned = extractBase32Secret(secret);
+  const key = base32ToBuffer(cleaned);
   const nowMs = Date.now() + clockOffsetMs;
   const epoch = Math.floor(nowMs / 1000);
   const remaining = period - (epoch % period);
@@ -349,8 +350,99 @@ function generateTOTP(secret, period = 30, digits = 6, clockOffsetMs = 0) {
   return {
     otp: String(codeInt % 10 ** digits).padStart(digits, '0'),
     remaining,
+    secretLength: cleaned.length,
     serverIso: new Date(nowMs).toISOString(),
   };
+}
+
+function parseAccountEntry(account, index) {
+  if (typeof account === 'string') {
+    const raw = account.trim();
+    if (raw.includes('---')) {
+      const parts = raw.split('---');
+      const email = (parts[0] || '').trim();
+      const password = (parts[1] || '').trim();
+      const totpSecret = parts.slice(2).join('---').trim();
+      if (!email || !password || !totpSecret) {
+        throw new Error(`Format akun #${index + 1} tidak lengkap. Gunakan: email---password---2fa`);
+      }
+      // Validasi awal secret Base32 agar error langsung terdeteksi sebelum membuka browser
+      base32ToBuffer(totpSecret);
+      return { mode: 'direct', email, password, totpSecret };
+    }
+    if (/^https?:\/\//i.test(raw)) {
+      return { mode: 'website_tab', url: raw };
+    }
+    throw new Error(
+      `Entri string akun #${index + 1} harus berupa URL http(s) atau format email---password---2fa.`
+    );
+  }
+
+  if (account && typeof account === 'object') {
+    const rawCombo = String(account.raw || account.combo || account.account || '').trim();
+    if (rawCombo.includes('---')) {
+      return parseAccountEntry(rawCombo, index);
+    }
+
+    const email = String(account.email || account.user || account.username || '').trim();
+    const password = String(account.password || account.pass || '').trim();
+    const totpSecret = String(
+      account.totpSecret ||
+        account['2fa'] ||
+        account.twofa ||
+        account.secret ||
+        account.otpSecret ||
+        account.authKey ||
+        account.totp ||
+        ''
+    ).trim();
+
+    if (email && password && totpSecret) {
+      base32ToBuffer(totpSecret);
+      return { mode: 'direct', email, password, totpSecret };
+    }
+
+    const url = String(account.url || account.link || '').trim();
+    if (url) {
+      if (!/^https?:\/\//i.test(url)) {
+        throw new Error(`Link website untuk akun #${index + 1} tidak valid.`);
+      }
+      return { mode: 'website_tab', url };
+    }
+  }
+
+  if (CREDENTIAL_SOURCE === 'website_tab' && WEBSITE_SOURCE.url) {
+    return { mode: 'website_tab', url: WEBSITE_SOURCE.url };
+  }
+
+  throw new Error(
+    `Data akun #${index + 1} di accounts.json tidak lengkap (isi URL atau email---password---2fa).`
+  );
+}
+
+function loadAccounts(accountsPath) {
+  const rawContent = fs.readFileSync(accountsPath, 'utf-8').trim();
+  if (!rawContent) {
+    throw new Error('File accounts.json kosong.');
+  }
+
+  try {
+    const parsed = JSON.parse(rawContent);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && Array.isArray(parsed.accounts)) return parsed.accounts;
+    throw new Error('accounts.json harus berisi array akun/link atau objek { "accounts": [...] }.');
+  } catch (jsonErr) {
+    // Fallback jika user menempelkan daftar baris email---password---2fa atau URL langsung di accounts.json
+    const lines = rawContent
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#') && !l.startsWith('//'));
+
+    if (lines.length > 0 && lines.every((l) => l.includes('---') || /^https?:\/\//i.test(l))) {
+      return lines;
+    }
+    throw new Error(`Gagal parsing accounts.json: ${jsonErr.message}`);
+  }
 }
 
 // ============================================================================
@@ -1046,15 +1138,27 @@ async function cleanupGoogleFamily(page, accountLabel, getPassword, getOtp, getC
 
 async function processAccount(account, index, total, stats) {
   const accountStart = Date.now();
-  const accountUrl =
-    typeof account === 'string'
-      ? account.trim()
-      : String(account?.url || account?.link || '').trim();
-  const useWebsiteTab = Boolean(accountUrl) || CREDENTIAL_SOURCE === 'website_tab';
-  const resolvedUrl = accountUrl || WEBSITE_SOURCE.url;
-  const accountLabel = `akun #${index + 1} yang diisi di accounts.json`;
+  let parsedAccount;
+  try {
+    parsedAccount = parseAccountEntry(account, index);
+  } catch (parseErr) {
+    ui.accountHeader(index, total, stats, `akun #${index + 1} (Format Tidak Valid)`);
+    stats.failed += 1;
+    ui.fail(`Error akun #${index + 1}: ${parseErr.message}`);
+    ui.accountDone(index, total, false, Date.now() - accountStart, 'Validasi Format Akun');
+    return;
+  }
 
-  ui.accountHeader(index, total, stats);
+  const useWebsiteTab = parsedAccount.mode === 'website_tab';
+  const resolvedUrl = parsedAccount.url || '';
+  const accountLabel = useWebsiteTab
+    ? `akun #${index + 1} yang diisi di accounts.json`
+    : parsedAccount.email;
+  const headerSource = useWebsiteTab
+    ? `akun #${index + 1} • Tab Website (URL disensor)`
+    : `${parsedAccount.email} • 2FA Base32 (${extractBase32Secret(parsedAccount.totpSecret).length} char)`;
+
+  ui.accountHeader(index, total, stats, headerSource);
   ui.spin(`Menyiapkan browser Chromium untuk akun #${index + 1}...`);
 
   const executablePath = resolveChromiumExecutable();
@@ -1118,6 +1222,8 @@ async function processAccount(account, index, total, stats) {
     ui.step('TAB-1', `Membuka link akun #${index + 1} (URL disensor)`);
     await sourcePage.goto(resolvedUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await sourcePage.waitForTimeout(2000);
+  } else {
+    ui.info(`Mode Direct Credentials: ${parsedAccount.email}`);
   }
 
   const page = await context.newPage();
@@ -1144,23 +1250,24 @@ async function processAccount(account, index, total, stats) {
   const getEmail = async () =>
     useWebsiteTab
       ? fetchFromSourceTab(sourcePage, page, 'email')
-      : account.email;
+      : parsedAccount.email;
 
   const getPassword = async () =>
     useWebsiteTab
       ? fetchFromSourceTab(sourcePage, page, 'password')
-      : account.password;
+      : parsedAccount.password;
 
   const getOtp = async () => {
     if (useWebsiteTab) {
       const liveOtp = await fetchFromSourceTab(sourcePage, page, 'totp');
       return { otp: liveOtp, remaining: 30, serverIso: new Date(Date.now() + googleClockOffsetMs).toISOString() };
     }
-    let res = generateTOTP(account.totpSecret, 30, 6, googleClockOffsetMs);
+    let res = generateTOTP(parsedAccount.totpSecret, 30, 6, googleClockOffsetMs);
     if (res.remaining <= 5) {
       await ui.countdown((res.remaining + 1) * 1000, 'Siklus OTP baru');
-      res = generateTOTP(account.totpSecret, 30, 6, googleClockOffsetMs);
+      res = generateTOTP(parsedAccount.totpSecret, 30, 6, googleClockOffsetMs);
     }
+    ui.sub(`Hash TOTP (${res.secretLength}-char Base32) -> ${res.otp} (sisa ${res.remaining}s)`);
     return res;
   };
 
@@ -1643,9 +1750,9 @@ async function main() {
     throw new Error('File accounts.json tidak ditemukan di direktori saat ini.');
   }
 
-  const accounts = JSON.parse(fs.readFileSync(accountsPath, 'utf-8'));
+  const accounts = loadAccounts(accountsPath);
   if (!Array.isArray(accounts) || accounts.length === 0) {
-    throw new Error('accounts.json harus berisi minimal 1 akun atau link URL.');
+    throw new Error('accounts.json harus berisi minimal 1 akun (URL atau email---password---2fa).');
   }
 
   const stats = {
