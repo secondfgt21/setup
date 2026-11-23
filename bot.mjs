@@ -1724,21 +1724,22 @@ async function processAccount(account, index, total, stats) {
     ui.step('11', 'Memilih alasan ("Saya tidak perlu profil ini" / "I don\'t need this profile")...');
     const reasonTextRegex = reasonQuickRegex;
     const dropdownTextRegex =
-      /pilih alasan|select a reason|choose a reason|pick a reason|why are you closing|mengapa anda menutup|alasan|reason/i;
+      /mengapa\s+anda\s+(?:ingin\s+)?menutup|why\s+(?:are\s+you|do\s+you\s+want\s+to)\s+clos(?:e|ing)|pilih\s+alasan|select\s+(?:a\s+)?reason|choose\s+(?:a\s+)?reason|pick\s+(?:a\s+)?reason|alasan|reason/i;
+    const exactQuestionRegex =
+      /^(?:mengapa\s+anda\s+(?:ingin\s+)?menutup.*|why\s+(?:are\s+you|do\s+you\s+want\s+to)\s+clos(?:e|ing).*|pilih\s+alasan|select\s+(?:a\s+)?reason|choose\s+(?:a\s+)?reason|pick\s+(?:a\s+)?reason)$/i;
+
+    const optionSelector =
+      '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="radio"], .goog-menuitem, .goog-menuitem-content, mat-option, div[data-value], label, li';
 
     const findReasonOption = async () =>
       (await findVisibleLocatorInAllFrames(page, (scope) =>
-        scope
-          .locator('[role="option"], [role="menuitem"], [role="radio"], label, li, mat-option')
-          .filter({ hasText: reasonTextRegex })
+        scope.locator(optionSelector).filter({ hasText: reasonTextRegex })
       )) ||
       (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(reasonTextRegex)));
 
     let reasonSelectedViaSelect = false;
     let reasonOption = await findVisibleLocatorInAllFrames(page, (scope) =>
-      scope
-        .locator('[role="option"], [role="menuitem"], [role="radio"], label, li, mat-option')
-        .filter({ hasText: reasonTextRegex })
+      scope.locator(optionSelector).filter({ hasText: reasonTextRegex })
     );
 
     if (!reasonOption) {
@@ -1762,36 +1763,63 @@ async function processAccount(account, index, total, stats) {
     }
 
     if (!reasonSelectedViaSelect && !reasonOption) {
-      // Jika opsi alasan berbentuk dropdown custom (Material listbox / combobox / button), buka terlebih dahulu
-      const dropdownTrigger =
-        (await findVisibleLocatorInAllFrames(page, (scope) =>
-          scope.locator('[role="listbox"], [role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"]')
-        )) ||
-        (await findVisibleLocatorInAllFrames(page, (scope) =>
+      // Buka dropdown modal ("Mengapa Anda ingin menutup profil pembayaran?" / "Why are you closing your payments profile?")
+      const triggerFactories = [
+        (scope) =>
           scope
-            .locator('button, [role="button"], div[tabindex], span[role="button"]')
-            .filter({ hasText: dropdownTextRegex })
-        )) ||
-        (await findVisibleLocatorInAllFrames(page, (scope) =>
-          scope.getByText(/^(?:pilih alasan|select a reason|choose a reason|pick a reason)$/i)
-        ));
+            .locator(
+              '[role="listbox"], [role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], [aria-haspopup="true"], .goog-flat-menu-button, .goog-menu-button'
+            )
+            .filter({ hasText: dropdownTextRegex }),
+        (scope) =>
+          scope
+            .locator('button, [role="button"], div[tabindex], div[jsaction], span[tabindex]')
+            .filter({ hasText: exactQuestionRegex }),
+        (scope) => scope.getByText(exactQuestionRegex),
+        (scope) =>
+          scope.locator(
+            '[role="listbox"], [role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"], [aria-haspopup="true"]'
+          ),
+      ];
 
-      if (dropdownTrigger) {
-        await dropdownTrigger.locator.scrollIntoViewIfNeeded().catch(() => {});
+      for (const factory of triggerFactories) {
+        const trigger = await findVisibleLocatorInAllFrames(page, factory);
+        if (!trigger) continue;
+
+        ui.sub('Membuka dropdown alasan penutupan...');
+        await trigger.locator.scrollIntoViewIfNeeded().catch(() => {});
         try {
-          await dropdownTrigger.locator.click({ timeout: 5000 });
+          await trigger.locator.click({ timeout: 5000 });
         } catch {
-          await dropdownTrigger.locator.click({ force: true, timeout: 5000 }).catch(async () => {
-            await dropdownTrigger.locator.evaluate((el) => el.click()).catch(() => {});
-          });
+          try {
+            await trigger.locator.click({ force: true, timeout: 5000 });
+          } catch {
+            const box = await trigger.locator.boundingBox().catch(() => null);
+            if (box) {
+              await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            } else {
+              await trigger.locator.evaluate((el) => el.click()).catch(() => {});
+            }
+          }
         }
-        await page.waitForTimeout(1000);
-      }
+        await page.waitForTimeout(900);
 
-      for (let waitOpt = 0; waitOpt < 5; waitOpt++) {
         reasonOption = await findReasonOption();
         if (reasonOption) break;
-        await page.waitForTimeout(800);
+
+        // Fallback keyboard jika klik fokus membuka menu lewat ArrowDown / Space
+        await trigger.locator.press('ArrowDown').catch(() => {});
+        await page.waitForTimeout(700);
+        reasonOption = await findReasonOption();
+        if (reasonOption) break;
+      }
+
+      if (!reasonOption) {
+        for (let waitOpt = 0; waitOpt < 5; waitOpt++) {
+          reasonOption = await findReasonOption();
+          if (reasonOption) break;
+          await page.waitForTimeout(800);
+        }
       }
     }
 
