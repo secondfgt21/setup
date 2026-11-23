@@ -264,27 +264,77 @@ function saveResults(liveList, dieList) {
   fs.writeFileSync(diePath, dieList.join('\n') + (dieList.length ? '\n' : ''), 'utf-8');
 }
 
-async function checkEmailStatus(browser, email, onPhase = () => {}) {
-  const context = await browser.newContext({
-    locale: 'id-ID',
-    viewport: { width: 1280, height: 900 },
-    userAgent:
-      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-  });
+const EMAIL_INPUT_SELECTOR = 'input[type="email"], #identifierId';
 
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  });
+async function returnToIdentifierScreen(page, previousEmail, onPhase = () => {}) {
+  const emailInput = page.locator(EMAIL_INPUT_SELECTOR).first();
+  if (await emailInput.isVisible().catch(() => false)) {
+    return emailInput;
+  }
 
-  const page = await context.newPage();
-  page.setDefaultTimeout(25000);
+  if (previousEmail) {
+    onPhase(`Klik modal ${previousEmail} untuk kembali...`);
+    const chipCandidates = [
+      page.locator(`[data-identifier="${previousEmail}"], [data-email="${previousEmail}"]`),
+      page.locator('[role="button"], button, [aria-haspopup], div[jsaction], a').filter({ hasText: previousEmail }),
+      page.getByText(previousEmail, { exact: false }),
+    ];
 
-  try {
+    let clickedChip = false;
+    for (const loc of chipCandidates) {
+      const target = loc.first();
+      if (await target.isVisible().catch(() => false)) {
+        try {
+          await target.click({ timeout: 4000 });
+        } catch {
+          await target.click({ force: true, timeout: 4000 }).catch(() => {});
+        }
+        clickedChip = true;
+        break;
+      }
+    }
+
+    if (clickedChip) {
+      const appeared = await emailInput
+        .waitFor({ state: 'visible', timeout: 4000 })
+        .then(() => true)
+        .catch(() => false);
+      if (appeared) return emailInput;
+
+      // Jika klik modal memunculkan daftar akun, klik "Gunakan akun lain" / "Use another account"
+      const anotherAcc = page
+        .locator('li, [role="link"], [role="button"], button, div')
+        .filter({ hasText: /gunakan akun lain|use another account/i })
+        .first();
+      if (await anotherAcc.isVisible().catch(() => false)) {
+        await anotherAcc.click({ force: true }).catch(() => {});
+        const appearedAfter = await emailInput
+          .waitFor({ state: 'visible', timeout: 5000 })
+          .then(() => true)
+          .catch(() => false);
+        if (appearedAfter) return emailInput;
+      }
+    }
+  }
+
+  // Fallback jika tombol kembali / modal tidak memunculkan input email
+  onPhase('Navigasi ulang ke halaman input email...');
+  await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+  if (await emailInput.waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false)) {
+    return emailInput;
+  }
+
+  await page.goto(FALLBACK_IDENTIFIER_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await emailInput.waitFor({ state: 'visible', timeout: 20000 });
+  return emailInput;
+}
+
+async function checkEmailStatus(page, email, previousEmail, isFirst, onPhase = () => {}) {
+  let emailInput;
+  if (isFirst) {
     onPhase('Membuka halaman login Google...');
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-    const emailSelector = 'input[type="email"], #identifierId';
-    let emailInput = page.locator(emailSelector).first();
+    emailInput = page.locator(EMAIL_INPUT_SELECTOR).first();
     const hasEmailBox = await emailInput
       .waitFor({ state: 'visible', timeout: 7000 })
       .then(() => true)
@@ -293,62 +343,71 @@ async function checkEmailStatus(browser, email, onPhase = () => {}) {
     if (!hasEmailBox) {
       onPhase('Membuka halaman identifier cadangan...');
       await page.goto(FALLBACK_IDENTIFIER_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      emailInput = page.locator(emailSelector).first();
+      emailInput = page.locator(EMAIL_INPUT_SELECTOR).first();
       await emailInput.waitFor({ state: 'visible', timeout: 20000 });
     }
+  } else {
+    emailInput = await returnToIdentifierScreen(page, previousEmail, onPhase);
+  }
 
-    onPhase(`Mengirim email ${email}...`);
-    await emailInput.fill(email);
-    await page.locator('#identifierNext, button:has-text("Berikutnya"), button:has-text("Next")').first().click();
-    onPhase('Menunggu respons Google...');
+  const pwdSelector =
+    'input[name="Passwd"]:not([aria-hidden="true"]), input[type="password"]:not([name="hiddenPassword"]):not([aria-hidden="true"])';
+  const captchaTextRegex =
+    /konfirmasi bahwa anda bukan robot|confirm you['’]?re not a robot|saya bukan robot|i['’]?m not a robot|ketik teks yang anda lihat|type the text you hear or see/i;
+  const accountInvalidRegex =
+    /tidak dapat menemukan akun google anda|couldn['’]t find your google account|akun anda telah dinonaktifkan|your account has been disabled/i;
 
-    const pwdSelector =
-      'input[name="Passwd"]:not([aria-hidden="true"]), input[type="password"]:not([name="hiddenPassword"]):not([aria-hidden="true"])';
-    const captchaTextRegex =
-      /konfirmasi bahwa anda bukan robot|confirm you['’]?re not a robot|saya bukan robot|i['’]?m not a robot|ketik teks yang anda lihat|type the text you hear or see/i;
-    const accountInvalidRegex =
-      /tidak dapat menemukan akun google anda|couldn['’]t find your google account|akun anda telah dinonaktifkan|your account has been disabled/i;
+  const prevErrorLoc = page.getByText(accountInvalidRegex).first();
+  const hadPreviousInvalidError = await prevErrorLoc.isVisible().catch(() => false);
 
-    for (let i = 0; i < 25; i++) {
-      const pwdVisible = await page.locator(pwdSelector).first().isVisible().catch(() => false);
-      if (pwdVisible) {
-        return { status: 'live', reason: 'Kolom password tersedia' };
-      }
+  onPhase(`Ganti & kirim email ${email}...`);
+  await emailInput.click();
+  await emailInput.press('ControlOrMeta+A').catch(() => {});
+  await emailInput.fill('');
+  await emailInput.fill(email);
+  await page.locator('#identifierNext, button:has-text("Berikutnya"), button:has-text("Next")').first().click();
 
-      const currentUrl = page.url().toLowerCase();
-      const hasCaptchaUrl =
-        currentUrl.includes('/challenge/recaptcha') || currentUrl.includes('/challenge/captcha');
-      const hasCaptchaFrame = await page
-        .locator('iframe[src*="recaptcha"], iframe[title*="reCAPTCHA" i], .g-recaptcha, #captchaimg')
-        .first()
-        .isVisible()
-        .catch(() => false);
-      const hasCaptchaText = await page
-        .getByText(captchaTextRegex)
-        .first()
-        .isVisible()
-        .catch(() => false);
+  if (hadPreviousInvalidError) {
+    await prevErrorLoc.waitFor({ state: 'hidden', timeout: 2000 }).catch(() => {});
+  }
+  await page.waitForTimeout(450);
+  onPhase('Menunggu respons Google...');
 
-      if (hasCaptchaUrl || hasCaptchaFrame || hasCaptchaText) {
-        return { status: 'die', reason: 'Terkena verifikasi Captcha (Saya bukan robot)' };
-      }
+  for (let i = 0; i < 35; i++) {
+    const pwdVisible = await page.locator(pwdSelector).first().isVisible().catch(() => false);
+    if (pwdVisible) {
+      return { status: 'live', reason: 'Kolom password tersedia' };
+    }
 
-      const hasInvalidAccount = await page
-        .getByText(accountInvalidRegex)
-        .first()
-        .isVisible()
-        .catch(() => false);
+    const currentUrl = page.url().toLowerCase();
+    const hasCaptchaUrl =
+      currentUrl.includes('/challenge/recaptcha') || currentUrl.includes('/challenge/captcha');
+    const hasCaptchaFrame = await page
+      .locator('iframe[src*="recaptcha"], iframe[title*="reCAPTCHA" i], .g-recaptcha, #captchaimg')
+      .first()
+      .isVisible()
+      .catch(() => false);
+    const hasCaptchaText = await page
+      .getByText(captchaTextRegex)
+      .first()
+      .isVisible()
+      .catch(() => false);
+
+    if (hasCaptchaUrl || hasCaptchaFrame || hasCaptchaText) {
+      return { status: 'die', reason: 'Terkena verifikasi Captcha (Saya bukan robot)' };
+    }
+
+    if (!hadPreviousInvalidError || i >= 3) {
+      const hasInvalidAccount = await prevErrorLoc.isVisible().catch(() => false);
       if (hasInvalidAccount) {
         return { status: 'die', reason: 'Email tidak ditemukan atau dinonaktifkan' };
       }
-
-      await page.waitForTimeout(800);
     }
 
-    return { status: 'die', reason: `Timeout menunggu kolom password (${page.url().split('?')[0]})` };
-  } finally {
-    await context.close();
+    await page.waitForTimeout(450);
   }
+
+  return { status: 'die', reason: `Timeout menunggu kolom password (${page.url().split('?')[0]})` };
 }
 
 async function main() {
@@ -357,7 +416,7 @@ async function main() {
   const startedAt = Date.now();
 
   ui.banner(path.basename(filePath), emails.length);
-  ui.spin('Meluncurkan browser Chromium...');
+  ui.spin('Meluncurkan browser Chromium (1 sesi cepat)...');
 
   const browser = await chromium.launch({
     executablePath,
@@ -373,6 +432,20 @@ async function main() {
     ],
   });
 
+  const context = await browser.newContext({
+    locale: 'id-ID',
+    viewport: { width: 1280, height: 900 },
+    userAgent:
+      'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+  });
+
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  });
+
+  const page = await context.newPage();
+  page.setDefaultTimeout(25000);
+
   const liveList = [];
   const dieList = [];
   let interrupted = false;
@@ -387,6 +460,7 @@ async function main() {
   };
   process.on('SIGINT', onSigInt);
 
+  let previousEmail = '';
   try {
     for (let i = 0; i < emails.length; i++) {
       if (interrupted) break;
@@ -397,7 +471,7 @@ async function main() {
       ui.spin(`[${i + 1}/${emails.length} • ${pct}% | ${tally}] ${email}`);
 
       try {
-        const result = await checkEmailStatus(browser, email, (phase) => {
+        const result = await checkEmailStatus(page, email, previousEmail, i === 0, (phase) => {
           ui.updateSpin(`[${i + 1}/${emails.length} | ${tally}] ${email} — ${C.dim}${phase}${C.reset}`);
         });
         if (result.status === 'live') {
@@ -412,12 +486,14 @@ async function main() {
         ui.result(i, emails.length, 'die', email, `Error: ${err.message}`, Date.now() - itemStart);
       }
 
+      previousEmail = email;
       saveResults(liveList, dieList);
     }
   } finally {
     process.off('SIGINT', onSigInt);
     ui.stopSpin();
-    await browser.close();
+    await context.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 
   ui.summary(liveList.length + dieList.length, emails.length, liveList.length, dieList.length, Date.now() - startedAt);
