@@ -1528,9 +1528,9 @@ async function processAccount(account, index, total, stats) {
     const tryAnotherReAuthSelector =
       'button:has-text("Coba cara lain"), button:has-text("Cara lainnya"), button:has-text("Try another way"), button:has-text("More ways"), a:has-text("Cara lainnya"), [role="button"]:has-text("Coba cara lain"), [role="button"]:has-text("Cara lainnya"), [role="button"]:has-text("Try another way")';
     const warningRegex =
-      /akses ke layanan akan seketika berubah|access to services will change|closing your payments profile|closing your google payments profile|why are you closing|mengapa anda menutup/i;
+      /akses ke layanan akan seketika berubah|access to services will change|closing your payments profile|closing your google payments profile|why are you closing|mengapa anda menutup|select a reason|choose a reason|pilih alasan/i;
     const reasonQuickRegex =
-      /saya tidak perlu profil ini lagi|i don['’]t need this profile anymore|i no longer need this profile/i;
+      /saya tidak perlu profil ini(?:\s+lagi)?|i\s+don['’]?t\s+need\s+this\s+profile(?:\s+anymore)?|i\s+no\s+longer\s+need\s+this\s+profile|no\s+longer\s+need(?:ed)?\s+this\s+profile/i;
 
     let authPage = null;
     let skipReAuth = false;
@@ -1719,34 +1719,97 @@ async function processAccount(account, index, total, stats) {
     await scrollAllFramesToBottom(page);
     await page.waitForTimeout(1200);
 
-    // [LANGKAH 11] Pilih alasan "Saya tidak perlu profil ini lagi"
+    // [LANGKAH 11] Pilih alasan "Saya tidak perlu profil ini (lagi)" / "I don't need this profile anymore"
     currentStep = 'Langkah 11: Pilih Alasan Penutupan';
-    ui.step('11', 'Memilih alasan "Saya tidak perlu profil ini lagi"...');
-    const reasonTextRegex =
-      /saya tidak perlu profil ini lagi|i don['’]t need this profile anymore|i no longer need this profile/i;
+    ui.step('11', 'Memilih alasan ("Saya tidak perlu profil ini" / "I don\'t need this profile")...');
+    const reasonTextRegex = reasonQuickRegex;
+    const dropdownTextRegex =
+      /pilih alasan|select a reason|choose a reason|pick a reason|why are you closing|mengapa anda menutup|alasan|reason/i;
 
-    // Jika opsi alasan berbentuk dropdown/select, buka terlebih dahulu
-    const dropdownTrigger = await findVisibleLocatorInAllFrames(page, (scope) =>
-      scope.locator('[role="listbox"], [role="combobox"], select, button:has-text("Alasan"), button:has-text("Reason"), div[aria-haspopup="listbox"]')
-    );
-    if (dropdownTrigger) {
-      await dropdownTrigger.locator.scrollIntoViewIfNeeded();
-      await dropdownTrigger.locator.click();
-      await page.waitForTimeout(1000);
-    }
+    const findReasonOption = async () =>
+      (await findVisibleLocatorInAllFrames(page, (scope) =>
+        scope
+          .locator('[role="option"], [role="menuitem"], [role="radio"], label, li, mat-option')
+          .filter({ hasText: reasonTextRegex })
+      )) ||
+      (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(reasonTextRegex)));
 
-    const reasonOption = await findVisibleLocatorInAllFrames(page, (scope) =>
+    let reasonSelectedViaSelect = false;
+    let reasonOption = await findVisibleLocatorInAllFrames(page, (scope) =>
       scope
-        .locator('[role="option"], [role="menuitem"], [role="radio"], label, div, span')
+        .locator('[role="option"], [role="menuitem"], [role="radio"], label, li, mat-option')
         .filter({ hasText: reasonTextRegex })
     );
 
     if (!reasonOption) {
-      throw new Error('Opsi alasan "Saya tidak perlu profil ini lagi" tidak ditemukan.');
+      // Cek jika berupa elemen <select> native
+      const nativeSelect = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator('select'));
+      if (nativeSelect) {
+        const matchedValue = await nativeSelect.locator
+          .evaluate((sel, patternSrc) => {
+            const re = new RegExp(patternSrc, 'i');
+            const opt = Array.from(sel.options || []).find((o) => re.test(o.textContent || ''));
+            return opt ? opt.value : null;
+          }, reasonTextRegex.source)
+          .catch(() => null);
+
+        if (matchedValue !== null) {
+          await nativeSelect.locator.selectOption(matchedValue);
+          reasonSelectedViaSelect = true;
+          ui.ok('Alasan penutupan dipilih dari dropdown <select>');
+        }
+      }
     }
 
-    await reasonOption.locator.scrollIntoViewIfNeeded();
-    await reasonOption.locator.click();
+    if (!reasonSelectedViaSelect && !reasonOption) {
+      // Jika opsi alasan berbentuk dropdown custom (Material listbox / combobox / button), buka terlebih dahulu
+      const dropdownTrigger =
+        (await findVisibleLocatorInAllFrames(page, (scope) =>
+          scope.locator('[role="listbox"], [role="combobox"], [aria-haspopup="listbox"], [aria-haspopup="menu"]')
+        )) ||
+        (await findVisibleLocatorInAllFrames(page, (scope) =>
+          scope
+            .locator('button, [role="button"], div[tabindex], span[role="button"]')
+            .filter({ hasText: dropdownTextRegex })
+        )) ||
+        (await findVisibleLocatorInAllFrames(page, (scope) =>
+          scope.getByText(/^(?:pilih alasan|select a reason|choose a reason|pick a reason)$/i)
+        ));
+
+      if (dropdownTrigger) {
+        await dropdownTrigger.locator.scrollIntoViewIfNeeded().catch(() => {});
+        try {
+          await dropdownTrigger.locator.click({ timeout: 5000 });
+        } catch {
+          await dropdownTrigger.locator.click({ force: true, timeout: 5000 }).catch(async () => {
+            await dropdownTrigger.locator.evaluate((el) => el.click()).catch(() => {});
+          });
+        }
+        await page.waitForTimeout(1000);
+      }
+
+      for (let waitOpt = 0; waitOpt < 5; waitOpt++) {
+        reasonOption = await findReasonOption();
+        if (reasonOption) break;
+        await page.waitForTimeout(800);
+      }
+    }
+
+    if (!reasonSelectedViaSelect) {
+      if (!reasonOption) {
+        throw new Error('Opsi alasan ("Saya tidak perlu profil ini" / "I don\'t need this profile anymore") tidak ditemukan.');
+      }
+
+      await reasonOption.locator.scrollIntoViewIfNeeded().catch(() => {});
+      try {
+        await reasonOption.locator.click({ timeout: 5000 });
+      } catch {
+        await reasonOption.locator.click({ force: true, timeout: 5000 }).catch(async () => {
+          await reasonOption.locator.evaluate((el) => el.click());
+        });
+      }
+      ui.ok('Alasan penutupan dipilih');
+    }
     await page.waitForTimeout(STEP_DELAY_MS);
 
     // [LANGKAH 12] Klik tombol final "Tutup profil pembayaran"
