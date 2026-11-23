@@ -264,55 +264,76 @@ function saveResults(liveList, dieList) {
   fs.writeFileSync(diePath, dieList.join('\n') + (dieList.length ? '\n' : ''), 'utf-8');
 }
 
-const EMAIL_INPUT_SELECTOR = 'input[type="email"], #identifierId';
+const EMAIL_INPUT_SELECTOR = 'input[name="identifier"]:not([type="hidden"]), input[type="email"]:not([type="hidden"])';
+
+async function waitForUiSettle(page, maxWaitMs = 1800) {
+  const scrim = page.locator('div.ZQxJQe[jsname="OQ2Y6"], [aria-busy="true"]').first();
+  if (await scrim.isVisible().catch(() => false)) {
+    await scrim.waitFor({ state: 'hidden', timeout: maxWaitMs }).catch(() => {});
+  }
+  await page.waitForTimeout(350);
+}
 
 async function returnToIdentifierScreen(page, previousEmail, onPhase = () => {}) {
-  const emailInput = page.locator(EMAIL_INPUT_SELECTOR).first();
-  if (await emailInput.isVisible().catch(() => false)) {
-    return emailInput;
+  const getVisibleEmailInput = () => page.locator(EMAIL_INPUT_SELECTOR).first();
+
+  if (await getVisibleEmailInput().isVisible().catch(() => false)) {
+    await waitForUiSettle(page);
+    if (await getVisibleEmailInput().isVisible().catch(() => false)) {
+      return getVisibleEmailInput();
+    }
   }
 
+  onPhase(`Klik modal ${previousEmail || 'akun'} untuk kembali...`);
+  const chipCandidates = [];
   if (previousEmail) {
-    onPhase(`Klik modal ${previousEmail} untuk kembali...`);
-    const chipCandidates = [
+    chipCandidates.push(
       page.locator(`[data-identifier="${previousEmail}"], [data-email="${previousEmail}"]`),
-      page.locator('[role="button"], button, [aria-haspopup], div[jsaction], a').filter({ hasText: previousEmail }),
-      page.getByText(previousEmail, { exact: false }),
-    ];
+      page.locator('[role="button"], button, [role="link"], [aria-haspopup]').filter({ hasText: previousEmail }),
+      page.getByText(previousEmail, { exact: true })
+    );
+  }
+  // Cadangan: chip email apa pun yang terlihat di bagian atas form login Google
+  chipCandidates.push(
+    page.locator('[data-identifier*="@"], [data-email*="@"]'),
+    page.locator('[role="button"][aria-haspopup], button[aria-haspopup]').filter({ hasText: /@/ })
+  );
 
-    let clickedChip = false;
-    for (const loc of chipCandidates) {
-      const target = loc.first();
-      if (await target.isVisible().catch(() => false)) {
-        try {
-          await target.click({ timeout: 4000 });
-        } catch {
-          await target.click({ force: true, timeout: 4000 }).catch(() => {});
-        }
-        clickedChip = true;
-        break;
+  let clickedChip = false;
+  for (const loc of chipCandidates) {
+    const target = loc.first();
+    if (await target.isVisible().catch(() => false)) {
+      try {
+        await target.click({ timeout: 3500 });
+      } catch {
+        await target.click({ force: true, timeout: 3500 }).catch(() => {});
       }
+      clickedChip = true;
+      break;
+    }
+  }
+
+  if (clickedChip) {
+    // Tunggu sebentar agar transisi/chooser muncul stabil
+    await page.waitForTimeout(450);
+
+    // Jika muncul daftar akun ("Gunakan akun lain" / "Use another account"), klik opsi tersebut
+    const anotherAcc = page
+      .locator('li, [role="link"], [role="button"], button, div[data-identifier=""]')
+      .filter({ hasText: /gunakan akun lain|use another account/i })
+      .first();
+    if (await anotherAcc.isVisible().catch(() => false)) {
+      await anotherAcc.click({ force: true }).catch(() => {});
     }
 
-    if (clickedChip) {
-      const appeared = await emailInput
-        .waitFor({ state: 'visible', timeout: 4000 })
-        .then(() => true)
-        .catch(() => false);
-      if (appeared) return emailInput;
-
-      // Jika klik modal memunculkan daftar akun, klik "Gunakan akun lain" / "Use another account"
-      const anotherAcc = page
-        .locator('li, [role="link"], [role="button"], button, div')
-        .filter({ hasText: /gunakan akun lain|use another account/i })
-        .first();
-      if (await anotherAcc.isVisible().catch(() => false)) {
-        await anotherAcc.click({ force: true }).catch(() => {});
-        const appearedAfter = await emailInput
-          .waitFor({ state: 'visible', timeout: 5000 })
-          .then(() => true)
-          .catch(() => false);
-        if (appearedAfter) return emailInput;
+    const appeared = await getVisibleEmailInput()
+      .waitFor({ state: 'visible', timeout: 5000 })
+      .then(() => true)
+      .catch(() => false);
+    if (appeared) {
+      await waitForUiSettle(page);
+      if (await getVisibleEmailInput().isVisible().catch(() => false)) {
+        return getVisibleEmailInput();
       }
     }
   }
@@ -320,22 +341,82 @@ async function returnToIdentifierScreen(page, previousEmail, onPhase = () => {})
   // Fallback jika tombol kembali / modal tidak memunculkan input email
   onPhase('Navigasi ulang ke halaman input email...');
   await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-  if (await emailInput.waitFor({ state: 'visible', timeout: 3000 }).then(() => true).catch(() => false)) {
-    return emailInput;
+  if (
+    await getVisibleEmailInput()
+      .waitFor({ state: 'visible', timeout: 3000 })
+      .then(() => true)
+      .catch(() => false)
+  ) {
+    await waitForUiSettle(page);
+    if (await getVisibleEmailInput().isVisible().catch(() => false)) {
+      return getVisibleEmailInput();
+    }
   }
 
   await page.goto(FALLBACK_IDENTIFIER_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await emailInput.waitFor({ state: 'visible', timeout: 20000 });
-  return emailInput;
+  await getVisibleEmailInput().waitFor({ state: 'visible', timeout: 20000 });
+  await waitForUiSettle(page);
+  return getVisibleEmailInput();
+}
+
+async function fillAndSubmitEmail(page, email, onPhase = () => {}) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const input = page.locator(EMAIL_INPUT_SELECTOR).first();
+      await input.waitFor({ state: 'visible', timeout: 8000 });
+      await waitForUiSettle(page, 1200);
+
+      // Re-acquire locator after settle in case Google re-rendered the DOM
+      const freshInput = page.locator(EMAIL_INPUT_SELECTOR).first();
+      await freshInput.waitFor({ state: 'visible', timeout: 5000 });
+
+      await freshInput.fill(email, { timeout: 8000 });
+      const currentVal = await freshInput.inputValue().catch(() => '');
+      if (currentVal !== email) {
+        await freshInput.click({ force: true, timeout: 4000 }).catch(() => {});
+        await freshInput.press('ControlOrMeta+A').catch(() => {});
+        await freshInput.fill(email, { timeout: 8000 });
+      }
+
+      const nextBtn = page
+        .locator('#identifierNext button, #identifierNext, button:has-text("Berikutnya"), button:has-text("Next")')
+        .first();
+      if (await nextBtn.isVisible().catch(() => false)) {
+        try {
+          await nextBtn.click({ timeout: 5000 });
+        } catch {
+          await nextBtn.click({ force: true, timeout: 4000 }).catch(async () => {
+            await freshInput.press('Enter');
+          });
+        }
+      } else {
+        await freshInput.press('Enter');
+      }
+      return;
+    } catch (err) {
+      if (attempt === 3) {
+        onPhase('Membuka ulang halaman login karena transisi halaman...');
+        await page.goto(FALLBACK_IDENTIFIER_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        const fallbackInput = page.locator(EMAIL_INPUT_SELECTOR).first();
+        await fallbackInput.waitFor({ state: 'visible', timeout: 15000 });
+        await fallbackInput.fill(email);
+        const nextBtn = page
+          .locator('#identifierNext button, #identifierNext, button:has-text("Berikutnya"), button:has-text("Next")')
+          .first();
+        await nextBtn.click({ force: true }).catch(() => fallbackInput.press('Enter'));
+        return;
+      }
+      await page.waitForTimeout(450);
+    }
+  }
 }
 
 async function checkEmailStatus(page, email, previousEmail, isFirst, onPhase = () => {}) {
-  let emailInput;
   if (isFirst) {
     onPhase('Membuka halaman login Google...');
     await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-    emailInput = page.locator(EMAIL_INPUT_SELECTOR).first();
-    const hasEmailBox = await emailInput
+    const firstInput = page.locator(EMAIL_INPUT_SELECTOR).first();
+    const hasEmailBox = await firstInput
       .waitFor({ state: 'visible', timeout: 7000 })
       .then(() => true)
       .catch(() => false);
@@ -343,11 +424,10 @@ async function checkEmailStatus(page, email, previousEmail, isFirst, onPhase = (
     if (!hasEmailBox) {
       onPhase('Membuka halaman identifier cadangan...');
       await page.goto(FALLBACK_IDENTIFIER_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-      emailInput = page.locator(EMAIL_INPUT_SELECTOR).first();
-      await emailInput.waitFor({ state: 'visible', timeout: 20000 });
+      await page.locator(EMAIL_INPUT_SELECTOR).first().waitFor({ state: 'visible', timeout: 20000 });
     }
   } else {
-    emailInput = await returnToIdentifierScreen(page, previousEmail, onPhase);
+    await returnToIdentifierScreen(page, previousEmail, onPhase);
   }
 
   const pwdSelector =
@@ -361,11 +441,7 @@ async function checkEmailStatus(page, email, previousEmail, isFirst, onPhase = (
   const hadPreviousInvalidError = await prevErrorLoc.isVisible().catch(() => false);
 
   onPhase(`Ganti & kirim email ${email}...`);
-  await emailInput.click();
-  await emailInput.press('ControlOrMeta+A').catch(() => {});
-  await emailInput.fill('');
-  await emailInput.fill(email);
-  await page.locator('#identifierNext, button:has-text("Berikutnya"), button:has-text("Next")').first().click();
+  await fillAndSubmitEmail(page, email, onPhase);
 
   if (hadPreviousInvalidError) {
     await prevErrorLoc.waitFor({ state: 'hidden', timeout: 2000 }).catch(() => {});
