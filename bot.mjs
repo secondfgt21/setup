@@ -805,12 +805,24 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
   const tryAnotherSelector =
     'button:has-text("Coba cara lain"), button:has-text("Cara lainnya"), button:has-text("Try another way"), button:has-text("More ways"), a:has-text("Cara lainnya"), [role="button"]:has-text("Coba cara lain"), [role="button"]:has-text("Cara lainnya"), [role="button"]:has-text("Try another way")';
 
+  const closeWatcher = new Promise((resolve) => {
+    if (page.isClosed()) return resolve('closed');
+    page.once('close', () => resolve('closed'));
+  });
+
   // Tunggu halaman verifikasi 2 langkah selesai dimuat (salah satu elemen tantangan muncul)
-  await page
-    .locator(`${totpInputSelector}, ${tryAnotherSelector}`)
-    .first()
-    .waitFor({ state: 'visible', timeout: 20000 })
-    .catch(() => {});
+  await Promise.race([
+    page
+      .locator(`${totpInputSelector}, ${tryAnotherSelector}`)
+      .first()
+      .waitFor({ state: 'visible', timeout: 20000 })
+      .catch(() => {}),
+    closeWatcher,
+  ]);
+  if (page.isClosed()) {
+    ui.ok('Verifikasi selesai (pop-up tertutup otomatis)');
+    return;
+  }
 
   let totpInput = page.locator(totpInputSelector).first();
   if (!(await totpInput.isVisible().catch(() => false))) {
@@ -818,9 +830,10 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
 
     if (await tryAnotherBtn.isVisible().catch(() => false)) {
       ui.sub('Klik "Coba cara lain" untuk memilih Google Authenticator...');
-      await tryAnotherBtn.click();
-      await page.waitForTimeout(1800);
+      await tryAnotherBtn.click().catch(() => {});
+      await page.waitForTimeout(1800).catch(() => {});
     }
+    if (page.isClosed()) return;
 
     const authOption = page
       .locator(
@@ -829,43 +842,74 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
       .first();
 
     if (await authOption.isVisible().catch(() => false)) {
-      await authOption.click();
-      await page.waitForTimeout(1800);
+      await authOption.click().catch(() => {});
+      await page.waitForTimeout(1800).catch(() => {});
     }
   }
+  if (page.isClosed()) return;
 
   totpInput = page.locator(totpInputSelector).first();
-  await totpInput.waitFor({ state: 'visible', timeout: 20000 });
+  await Promise.race([
+    totpInput.waitFor({ state: 'visible', timeout: 20000 }),
+    closeWatcher.then(() => {
+      throw new Error('POPUP_CLOSED');
+    }),
+  ]).catch((err) => {
+    if (err?.message === 'POPUP_CLOSED' || page.isClosed()) return;
+    throw err;
+  });
+  if (page.isClosed()) return;
 
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (page.isClosed()) return;
     const { otp, remaining, serverIso } = await getOtpFn();
+    if (page.isClosed()) return;
     const offsetSec = Math.round((getClockOffsetFn ? getClockOffsetFn() : 0) / 1000);
     ui.sub(`Sinkronisasi waktu Google: ${serverIso.slice(11, 19)}Z (selisih ${offsetSec}s)`);
     ui.ok(`Memasukkan OTP 6-digit: ${C.bold}${otp}${C.reset}${C.green} (sisa ${remaining}s)`);
     ui.spin('Mengirim & memverifikasi kode OTP...');
 
-    await totpInput.click();
-    await totpInput.fill('');
-    await totpInput.type(otp, { delay: 75 });
-    await page.waitForTimeout(400);
+    await totpInput.click().catch(() => {});
+    if (page.isClosed()) return;
+    await totpInput.fill('').catch(() => {});
+    if (page.isClosed()) return;
+    await totpInput.type(otp, { delay: 75 }).catch(() => {});
+    if (page.isClosed()) return;
+    await page.waitForTimeout(400).catch(() => {});
+    if (page.isClosed()) {
+      ui.ok('Verifikasi OTP lolos (pop-up tertutup otomatis)');
+      return;
+    }
 
     const nextBtn = page
       .locator('#totpNext button, #totpNext, button:has-text("Berikutnya"), button:has-text("Next")')
       .first();
     if (await nextBtn.isVisible().catch(() => false)) {
-      await nextBtn.click();
+      await nextBtn.click().catch(() => {});
     } else {
-      await totpInput.press('Enter');
+      await totpInput.press('Enter').catch(() => {});
     }
 
-    // Tunggu URL berpindah dari /challenge/totp
-    const moved = await page
-      .waitForURL((u) => !u.href.includes('/challenge/totp'), { timeout: 12000 })
-      .then(() => true)
-      .catch(() => false);
+    // Tunggu URL berpindah dari /challenge/totp ATAU jendela pop-up tertutup otomatis
+    const outcome = await Promise.race([
+      page
+        .waitForURL((u) => !u.href.includes('/challenge/totp'), { timeout: 12000 })
+        .then(() => 'moved')
+        .catch(() => 'timeout'),
+      closeWatcher,
+    ]);
 
-    if (moved) {
-      await page.waitForTimeout(1500);
+    if (outcome === 'closed' || page.isClosed()) {
+      ui.ok('Verifikasi OTP lolos (pop-up tertutup otomatis)');
+      return;
+    }
+
+    if (outcome === 'moved') {
+      await page.waitForTimeout(1500).catch(() => {});
+      if (page.isClosed()) {
+        ui.ok('Verifikasi OTP lolos (pop-up tertutup otomatis)');
+        return;
+      }
       ui.ok(`Verifikasi OTP lolos -> ${shortUrl(page.url())}`);
       return;
     }
@@ -884,7 +928,9 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
     }
   }
 
-  ui.sub(`URL setelah submit OTP: ${shortUrl(page.url())}`);
+  if (!page.isClosed()) {
+    ui.sub(`URL setelah submit OTP: ${shortUrl(page.url())}`);
+  }
 }
 
 // ============================================================================
@@ -1467,25 +1513,40 @@ async function processAccount(account, index, total, stats) {
     if (!paymentsProfileCleared) {
 
     const pagesBeforeClose = new Set(context.pages());
-    const popupWaiter = context.waitForEvent('page', { timeout: 25000 }).catch(() => null);
 
     await foundCloseLink.locator.scrollIntoViewIfNeeded();
     await foundCloseLink.locator.click();
     ui.ok('Klik "Tutup profil pembayaran"');
 
-    // [LANGKAH 8 & 9] Deteksi apakah Google membuka jendela pop-up baru ("A new window will appear...") atau redirect langsung
-    currentStep = 'Langkah 8-9: Verifikasi Ulang Password';
-    ui.step('08-09', 'Menunggu verifikasi ulang password...');
+    // [LANGKAH 8 & 9] Cek apakah ada kolom sandi/TOTP atau langsung masuk modal penutupan
+    currentStep = 'Langkah 8-9: Cek Verifikasi Sandi/TOTP atau Langsung Tutup';
+    ui.step('08-09', 'Memeriksa apakah ada verifikasi sandi/TOTP...');
     const pwdSelector =
       'input[name="Passwd"]:not([aria-hidden="true"]), input[type="password"]:not([name="hiddenPassword"]):not([aria-hidden="true"])';
+    const totpReAuthSelector =
+      'input[name="totpPin"], #totpPin, input[type="tel"][autocomplete="one-time-code"], input[aria-label*="code" i], input[aria-label*="kode" i]';
+    const tryAnotherReAuthSelector =
+      'button:has-text("Coba cara lain"), button:has-text("Cara lainnya"), button:has-text("Try another way"), button:has-text("More ways"), a:has-text("Cara lainnya"), [role="button"]:has-text("Coba cara lain"), [role="button"]:has-text("Cara lainnya"), [role="button"]:has-text("Try another way")';
     const warningRegex =
-      /akses ke layanan akan seketika berubah|access to services will change|closing your payments profile|closing your google payments profile|why are you closing/i;
+      /akses ke layanan akan seketika berubah|access to services will change|closing your payments profile|closing your google payments profile|why are you closing|mengapa anda menutup/i;
+    const reasonQuickRegex =
+      /saya tidak perlu profil ini lagi|i don['’]t need this profile anymore|i no longer need this profile/i;
 
     let authPage = null;
     let skipReAuth = false;
 
-    for (let waitAuth = 0; waitAuth < 25; waitAuth++) {
-      // Cek 1: Jendela pop-up baru terbuka di context
+    for (let waitAuth = 0; waitAuth < 12; waitAuth++) {
+      // Cek 1: Modal peringatan / alasan penutupan langsung muncul tanpa sandi/TOTP
+      const alreadyWarning =
+        (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(warningRegex))) ||
+        (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(reasonQuickRegex)));
+      if (alreadyWarning) {
+        skipReAuth = true;
+        ui.info('Tidak ada verifikasi sandi/TOTP — langsung eksekusi tutup profil!');
+        break;
+      }
+
+      // Cek 2: Jendela pop-up baru terbuka di context
       const newTab = context.pages().find((p) => !pagesBeforeClose.has(p) && !p.isClosed());
       if (newTab) {
         authPage = newTab;
@@ -1493,111 +1554,131 @@ async function processAccount(account, index, total, stats) {
         break;
       }
 
-      // Cek 2: Tab utama langsung redirect ke accounts.google.com
+      // Cek 3: Tab utama langsung redirect ke accounts.google.com
       if (page.url().includes('accounts.google.com')) {
         authPage = page;
         ui.sub(`Redirect re-auth tab utama: ${shortUrl(page.url())}`);
         break;
       }
 
-      // Cek 3: Input password muncul di halaman/iframe yang sama
+      // Cek 4: Input password atau TOTP muncul inline di halaman/iframe yang sama
       const inlinePwd = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator(pwdSelector));
-      if (inlinePwd) {
+      const inlineTotp = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator(totpReAuthSelector));
+      if (inlinePwd || inlineTotp) {
         authPage = page;
-        ui.sub('Form password re-auth terdeteksi inline.');
+        ui.sub('Form verifikasi re-auth terdeteksi inline.');
         break;
       }
 
-      // Cek 4: Modal peringatan penutupan sudah langsung muncul tanpa re-auth
-      const alreadyWarning = await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(warningRegex));
-      if (alreadyWarning) {
-        skipReAuth = true;
-        ui.sub('Langsung masuk modal konfirmasi tanpa re-auth.');
-        break;
-      }
-
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(800);
     }
 
     if (!authPage && !skipReAuth) {
-      const waitedPopup = await Promise.race([popupWaiter, page.waitForTimeout(500).then(() => null)]);
-      if (waitedPopup && !waitedPopup.isClosed()) {
-        authPage = waitedPopup;
-      }
+      ui.info('Tidak ada kolom sandi/TOTP — langsung lanjut ke penutupan profil!');
+      skipReAuth = true;
     }
 
-    if (!skipReAuth) {
-      if (!authPage) {
-        throw new Error(
-          'Jendela pop-up maupun form verifikasi ulang password tidak muncul setelah klik Close payments profile.'
-        );
-      }
-
+    if (!skipReAuth && authPage) {
       activeDebugPage = authPage;
       await authPage.bringToFront().catch(() => {});
-      await authPage.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
-      await authPage.waitForTimeout(1500);
+      await authPage.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+      await authPage.waitForTimeout(1000).catch(() => {});
 
-      // Jika pop-up menampilkan pemilih akun / konfirmasi email dulu, tangani
-      const accountTile = await findVisibleLocatorInAllFrames(authPage, (scope) =>
-        scope.locator('[data-identifier], [data-email]')
-      );
-      const pwdCheckNow = await findVisibleLocatorInAllFrames(authPage, (scope) => scope.locator(pwdSelector));
-      if (!pwdCheckNow && accountTile) {
-        await accountTile.locator.click().catch(() => {});
-        await authPage.waitForTimeout(2000);
-      }
-
-      const reAuthPwdLoc = await (async () => {
-        for (let t = 0; t < 25; t++) {
-          if (authPage.isClosed()) return null;
-          const found = await findVisibleLocatorInAllFrames(authPage, (scope) => scope.locator(pwdSelector));
-          if (found) return found;
-          await authPage.waitForTimeout(1000);
+      let handledPwd = false;
+      for (let authStep = 0; authStep < 30; authStep++) {
+        if (authPage !== page && authPage.isClosed()) {
+          ui.ok('Jendela verifikasi tertutup otomatis');
+          break;
         }
-        return null;
-      })();
-
-      if (reAuthPwdLoc) {
-        const pwdForReAuth = await getPassword();
-        if (authPage !== page) {
-          await authPage.bringToFront().catch(() => {});
+        if (authPage === page && page.url().includes('payments.google.com')) {
+          const modalNow =
+            (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(warningRegex))) ||
+            (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(reasonQuickRegex)));
+          if (modalNow) break;
         }
-        await reAuthPwdLoc.locator.fill(pwdForReAuth);
-        const nextBtn = await findVisibleLocatorInAllFrames(authPage, (scope) =>
-          scope.locator('#passwordNext, button:has-text("Berikutnya"), button:has-text("Next")')
+
+        // Cek jika sudah muncul modal konfirmasi penutupan
+        const hasWarningNow = await findVisibleLocatorInAllFrames(authPage, (scope) => scope.getByText(warningRegex));
+        if (hasWarningNow) break;
+
+        // 1) Cek kolom Password (jika belum diisi di ronde ini)
+        const pwdLoc = await findVisibleLocatorInAllFrames(authPage, (scope) => scope.locator(pwdSelector));
+        if (pwdLoc && !handledPwd) {
+          handledPwd = true;
+          ui.sub('Mengisi ulang password...');
+          const pwdForReAuth = await getPassword();
+          if (authPage !== page && !authPage.isClosed()) {
+            await authPage.bringToFront().catch(() => {});
+          }
+          if (authPage.isClosed()) break;
+          await pwdLoc.locator.fill(pwdForReAuth).catch(() => {});
+          const nextBtn = await findVisibleLocatorInAllFrames(authPage, (scope) =>
+            scope.locator('#passwordNext, button:has-text("Berikutnya"), button:has-text("Next")')
+          );
+          if (nextBtn) {
+            await nextBtn.locator.click().catch(() => {});
+          } else {
+            await pwdLoc.locator.press('Enter').catch(() => {});
+          }
+          await authPage.waitForTimeout(2000).catch(() => {});
+          continue;
+        }
+
+        // 2) Cek kolom TOTP / "Coba cara lain"
+        const totpLoc = await findVisibleLocatorInAllFrames(authPage, (scope) =>
+          scope.locator(totpReAuthSelector)
         );
-        if (nextBtn) {
-          await nextBtn.locator.click();
-        } else {
-          await reAuthPwdLoc.locator.press('Enter');
+        const tryAnotherVisible =
+          !authPage.isClosed() &&
+          authPage.url().includes('accounts.google.com') &&
+          (await authPage.locator(tryAnotherReAuthSelector).first().isVisible().catch(() => false));
+
+        if (totpLoc || tryAnotherVisible) {
+          ui.sub('Verifikasi TOTP tambahan di jendela re-auth...');
+          await submitTotpChallenge(authPage, getOtp, () => googleClockOffsetMs);
+          await authPage.waitForTimeout(1500).catch(() => {});
+          continue;
         }
-        await authPage.waitForTimeout(2500);
+
+        // 3) Cek pemilih akun atau tombol Lanjutkan/Continue
+        if (!authPage.isClosed() && authPage.url().includes('accounts.google.com')) {
+          const accountTile = await findVisibleLocatorInAllFrames(authPage, (scope) =>
+            scope.locator('[data-identifier], [data-email]')
+          );
+          if (accountTile) {
+            await accountTile.locator.click().catch(() => {});
+            await authPage.waitForTimeout(1500).catch(() => {});
+            continue;
+          }
+
+          const contBtn = await findVisibleLocatorInAllFrames(authPage, (scope) =>
+            scope.locator('button, [role="button"]').filter({ hasText: /^\s*(lanjutkan|continue)\s*$/i })
+          );
+          if (contBtn) {
+            await contBtn.locator.click().catch(() => {});
+            await authPage.waitForTimeout(1500).catch(() => {});
+            continue;
+          }
+        }
+
+        // Jika sudah lebih dari 6 detik tidak ada input sandi maupun TOTP sama sekali, lanjut ke Step 10
+        if (authStep >= 6 && !handledPwd) {
+          ui.info('Tidak ditemukan kolom sandi/TOTP — lanjut eksekusi tutup profil!');
+          break;
+        }
+
+        await authPage.waitForTimeout(1000).catch(() => {});
       }
 
-      // Tangani jika Google meminta verifikasi TOTP ulang di pop-up/halaman re-auth
-      if (
-        !authPage.isClosed() &&
-        authPage.url().includes('accounts.google.com') &&
-        (await authPage
-          .locator('input[name="totpPin"], #totpPin, button:has-text("Coba cara lain"), button:has-text("Try another way")')
-          .first()
-          .isVisible()
-          .catch(() => false))
-      ) {
-        ui.sub('Verifikasi TOTP tambahan di jendela re-auth...');
-        await submitTotpChallenge(authPage, getOtp, () => googleClockOffsetMs);
-      }
-
-      if (authPage !== page) {
+      if (authPage !== page && !authPage.isClosed()) {
         ui.sub('Menunggu jendela pop-up verifikasi tertutup otomatis...');
-        await authPage.waitForEvent('close', { timeout: 25000 }).catch(() => {});
-        activeDebugPage = page;
-        await page.bringToFront().catch(() => {});
-      } else {
-        await page.waitForURL((url) => url.href.includes('payments.google.com'), { timeout: 45000 });
+        await authPage.waitForEvent('close', { timeout: 15000 }).catch(() => {});
+      } else if (authPage === page && !page.url().includes('payments.google.com')) {
+        await page.waitForURL((url) => url.href.includes('payments.google.com'), { timeout: 30000 }).catch(() => {});
       }
-      await page.waitForTimeout(2500);
+      activeDebugPage = page;
+      await page.bringToFront().catch(() => {});
+      await page.waitForTimeout(2000).catch(() => {});
     }
 
     // [LANGKAH 10] Tunggu pop-up "Akses ke layanan akan seketika berubah" & scroll ke paling bawah
@@ -1605,11 +1686,28 @@ async function processAccount(account, index, total, stats) {
     ui.step('10', 'Menunggu modal konfirmasi penutupan...');
 
     let modalFound = null;
+    let retriedCloseClick = false;
     for (let waitTry = 0; waitTry < 20; waitTry++) {
-      modalFound = await findVisibleLocatorInAllFrames(page, (scope) =>
-        scope.getByText(warningRegex)
-      );
+      modalFound =
+        (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(warningRegex))) ||
+        (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(reasonQuickRegex)));
       if (modalFound) break;
+
+      // Jika setelah 5 detik modal belum terbuka dan link "Tutup profil pembayaran" masih terlihat, klik ulang
+      if (waitTry === 5 && !retriedCloseClick) {
+        const stillCloseLink =
+          (await findVisibleLocatorInAllFrames(page, (scope) =>
+            scope.locator('a, button, [role="button"], [role="link"]').filter({ hasText: closeProfileRegex })
+          )) ||
+          (await findVisibleLocatorInAllFrames(page, (scope) => scope.getByText(closeProfileRegex)));
+        if (stillCloseLink) {
+          retriedCloseClick = true;
+          ui.sub('Mengklik ulang "Tutup profil pembayaran" setelah verifikasi...');
+          await stillCloseLink.locator.scrollIntoViewIfNeeded().catch(() => {});
+          await stillCloseLink.locator.click().catch(() => {});
+        }
+      }
+
       await page.waitForTimeout(1000);
     }
 
