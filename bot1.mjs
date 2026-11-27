@@ -946,19 +946,22 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
   let newSecret = '';
   for (let t = 0; t < 15; t++) {
     newSecret = await page.evaluate(() => {
-      const bodyText = document.body ? document.body.innerText : '';
-      const lines = bodyText.split(/[\s\n]+/);
-      for (const w of lines) {
-        const cleaned = w.replace(/[\s=-]+/g, '').toUpperCase();
-        if (/^[A-Z2-7]{16,32}$/.test(cleaned)) {
-          return cleaned;
+      for (const inp of document.querySelectorAll('input, textarea')) {
+        const val = String(inp.value || '').replace(/[\s=-]+/g, '').toUpperCase();
+        if (/^[A-Z2-7]{16,32}$/.test(val)) {
+          return val;
         }
       }
-      const els = document.querySelectorAll('code, input, span, div, p');
+
+      const ignoreWords = new Set(['PRIVASI', 'PERSYARATAN', 'BANTUAN', 'TENTANG', 'GOOGLE', 'AKUN', 'SETTINGS', 'TERMS', 'PRIVACY', 'HELP', 'ABOUT']);
+      const els = document.querySelectorAll('code, span, div, p, strong, b');
       for (const el of els) {
-        const txt = (el.innerText || el.value || '').replace(/[\s=-]+/g, '').toUpperCase();
-        if (/^[A-Z2-7]{16,32}$/.test(txt)) {
-          return txt;
+        const txt = (el.innerText || '').trim();
+        const cleaned = txt.replace(/[\s=-]+/g, '').toUpperCase();
+        if (/^[A-Z2-7]{16,32}$/.test(cleaned)) {
+          if (!ignoreWords.has(cleaned)) {
+            return cleaned;
+          }
         }
       }
       return '';
