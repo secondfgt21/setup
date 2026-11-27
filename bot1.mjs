@@ -942,7 +942,6 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
   await cantScanBtn.locator.click();
   await page.waitForTimeout(2000);
 
-  ui.step('12', 'Menyalin 32-karakter Base32 secret code baru...');
   let newSecret = '';
   for (let t = 0; t < 15; t++) {
     newSecret = await page.evaluate(() => {
@@ -974,7 +973,7 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
   if (!newSecret || newSecret.length < 16) {
     throw new Error('Gagal mengekstrak 32-karakter Base32 secret code baru dari halaman Google Authenticator.');
   }
-  ui.ok(`Secret 32-char baru didapatkan (${newSecret.length} char)`);
+  ui.step('12', `Menyalin 32-karakter Base32 secret code baru (${newSecret})`);
 
   ui.step('13', 'Klik Berikutnya & Verifikasi TOTP dari secret baru...');
   const nextBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
