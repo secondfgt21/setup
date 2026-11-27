@@ -927,7 +927,7 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
   for (let t = 0; t < 15; t++) {
     cantScanBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
       scope.locator('button, [role="button"], a').filter({
-        hasText: /tidak dapat memindai kode|can['’]t scan it|can['’]t scan code/i,
+        hasText: /tidak dapat memindai|tidak dapat memindainya|can['’]t scan it|can['’]t scan code/i,
       })
     );
     if (cantScanBtn) break;
