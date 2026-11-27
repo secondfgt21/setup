@@ -16,6 +16,10 @@ const { chromium } = await import('playwright-core');
 
 const PASSWORD_CHANGE_URL =
   'https://myaccount.google.com/signinoptions/password?gar=WzIxXQ&continue=https://myaccount.google.com/security?gar%3DWzIxXQ%26hl%3Did%26utm_source%3DOGB%26utm_medium%3Dact&rapt=AEjHL4OYqrWy2dI3rucTXe9HArW_l_VsfoWqVRNxKMTNALcpMg2qVmvVRmUkZC9IhK7WGzvHyDZ-FXUxcapmLMNw68YeMjjwc7lNfjRNKPCjQ2JLLc5DiMw';
+
+const AUTH_SETTINGS_URL =
+  'https://myaccount.google.com/two-step-verification/authenticator?utm_source=google-account&utm_medium=web&utm_campaign=authenticator-screen&continue=https://myaccount.google.com/security';
+
 const NEW_PASSWORD = 'impura123456';
 const HEADLESS = true;
 const DRY_RUN = false;
@@ -176,8 +180,8 @@ const ui = {
   banner(totalAccounts) {
     this.box(
       [
-        `${C.bold}${C.brightCyan}GOOGLE PASSWORD CHANGER BOT${C.reset}`,
-        `${C.dim}Total Antrean: ${C.white}${totalAccounts} akun${C.dim}  •  Baru: ${C.brightGreen}${NEW_PASSWORD}${C.reset}`,
+        `${C.bold}${C.brightCyan}GOOGLE PASSWORD & AUTHENTICATOR ROTATOR${C.reset}`,
+        `${C.dim}Total Antrean: ${C.white}${totalAccounts} akun${C.dim}  •  Sandi Baru: ${C.brightGreen}${NEW_PASSWORD}${C.reset}`,
       ],
       C.brightCyan
     );
@@ -265,9 +269,9 @@ const ui = {
     const bar = buildBar(1, 14);
     this.box(
       [
-        `${C.bold}${C.brightGreen}RINGKASAN UBAH SANDI${C.reset}  ${bar} ${C.brightCyan}100%${C.reset}`,
+        `${C.bold}${C.brightGreen}RINGKASAN UBAH SANDI & AUTHEN${C.reset}  ${bar} ${C.brightCyan}100%${C.reset}`,
         `${C.dim}Total Akun :${C.reset} ${C.white}${total}${C.reset}  ${C.dim}(${formatDuration(totalMs)})${C.reset}`,
-        `${C.brightGreen}✓ Berhasil :${C.reset} ${stats.success}`,
+        `${C.brightGreen}✓ Berhasil :${C.reset} ${stats.success} (tersimpan di berhasil.txt)`,
         `${C.brightRed}✗ Gagal    :${C.reset} ${stats.failed}`,
       ],
       stats.failed === 0 ? C.brightGreen : C.yellow
@@ -431,6 +435,13 @@ function loadAccounts(accountsPath) {
     }
     throw new Error(`Gagal parsing accounts.json: ${jsonErr.message}`);
   }
+}
+
+function saveBerhasilResult(email, newPass, newSecret) {
+  const line = `${email}---${newPass}---${newSecret}\n`;
+  const filePath = path.resolve(process.cwd(), 'berhasil.txt');
+  fs.appendFileSync(filePath, line, 'utf-8');
+  ui.ok(`Tersimpan ke berhasil.txt: ${email}---${newPass}---${newSecret}`);
 }
 
 // ============================================================================
@@ -844,7 +855,158 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
 }
 
 // ============================================================================
-// PROCESS ACCOUNT: LOGIN & CHANGE PASSWORD
+// ROTASI GOOGLE AUTHENTICATOR
+// ============================================================================
+async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetFn, email) {
+  ui.step('09', 'Membuka setelan Google Authenticator...');
+  await page.goto(AUTH_SETTINGS_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForTimeout(2000);
+
+  const pwdSelector =
+    'input[name="Passwd"]:not([aria-hidden="true"]), input[type="password"]:not([name="hiddenPassword"]):not([aria-hidden="true"])';
+  const totpReAuthSelector =
+    'input[name="totpPin"], #totpPin, input[type="tel"][autocomplete="one-time-code"], input[aria-label*="code" i], input[aria-label*="kode" i]';
+
+  // Re-auth jika diminta di halaman authenticator
+  for (let reAuth = 0; reAuth < 10; reAuth++) {
+    const hasChangeAppBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
+      scope.locator('button, [role="button"], a').filter({
+        hasText: /ubah aplikasi pengautentikasi|change authenticator app|setup authenticator|konfigurasikan pengautentikasi/i,
+      })
+    );
+    if (hasChangeAppBtn) break;
+
+    const inlinePwd = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator(pwdSelector));
+    if (inlinePwd) {
+      ui.sub('Re-auth sandi sebelum ubah Authenticator...');
+      await inlinePwd.locator.fill(await getPassword()).catch(() => {});
+      const nextBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
+        scope.locator('#passwordNext, button:has-text("Berikutnya"), button:has-text("Next")')
+      );
+      if (nextBtn) await nextBtn.locator.click().catch(() => {});
+      else await inlinePwd.locator.press('Enter').catch(() => {});
+      await page.waitForTimeout(2500);
+      continue;
+    }
+
+    const inlineTotp = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator(totpReAuthSelector));
+    if (inlineTotp) {
+      ui.sub('Re-auth TOTP sebelum ubah Authenticator...');
+      await submitTotpChallenge(page, getOtp, () => googleClockOffsetMs);
+      await page.waitForTimeout(2500);
+      continue;
+    }
+
+    await page.waitForTimeout(1000);
+  }
+
+  ui.step('10', 'Mengklik "Ubah aplikasi pengautentikasi"...');
+  let changeAppBtn = null;
+  for (let t = 0; t < 15; t++) {
+    changeAppBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
+      scope.locator('button, [role="button"], a').filter({
+        hasText: /ubah aplikasi pengautentikasi|change authenticator app|setup authenticator|konfigurasikan pengautentikasi/i,
+      })
+    );
+    if (changeAppBtn) break;
+    await page.waitForTimeout(1000);
+  }
+
+  if (!changeAppBtn) {
+    throw new Error('Tombol "Ubah aplikasi pengautentikasi" tidak ditemukan di halaman setting authenticator.');
+  }
+
+  await changeAppBtn.locator.scrollIntoViewIfNeeded().catch(() => {});
+  await changeAppBtn.locator.click();
+  await page.waitForTimeout(2000);
+
+  ui.step('11', 'Mengklik "Tidak dapat memindai kode" / "Can\'t scan it"...');
+  let cantScanBtn = null;
+  for (let t = 0; t < 15; t++) {
+    cantScanBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
+      scope.locator('button, [role="button"], a').filter({
+        hasText: /tidak dapat memindai kode|can['’]t scan it|can['’]t scan code/i,
+      })
+    );
+    if (cantScanBtn) break;
+    await page.waitForTimeout(1000);
+  }
+
+  if (!cantScanBtn) {
+    throw new Error('Tombol "Tidak dapat memindai kode" (Can\'t scan it) tidak ditemukan.');
+  }
+
+  await cantScanBtn.locator.scrollIntoViewIfNeeded().catch(() => {});
+  await cantScanBtn.locator.click();
+  await page.waitForTimeout(2000);
+
+  ui.step('12', 'Menyalin 32-karakter Base32 secret code baru...');
+  let newSecret = '';
+  for (let t = 0; t < 15; t++) {
+    newSecret = await page.evaluate(() => {
+      const bodyText = document.body ? document.body.innerText : '';
+      const lines = bodyText.split(/[\s\n]+/);
+      for (const w of lines) {
+        const cleaned = w.replace(/[\s=-]+/g, '').toUpperCase();
+        if (/^[A-Z2-7]{16,32}$/.test(cleaned)) {
+          return cleaned;
+        }
+      }
+      const els = document.querySelectorAll('code, input, span, div, p');
+      for (const el of els) {
+        const txt = (el.innerText || el.value || '').replace(/[\s=-]+/g, '').toUpperCase();
+        if (/^[A-Z2-7]{16,32}$/.test(txt)) {
+          return txt;
+        }
+      }
+      return '';
+    });
+    if (newSecret && newSecret.length >= 16) break;
+    await page.waitForTimeout(1000);
+  }
+
+  newSecret = extractBase32Secret(newSecret);
+  if (!newSecret || newSecret.length < 16) {
+    throw new Error('Gagal mengekstrak 32-karakter Base32 secret code baru dari halaman Google Authenticator.');
+  }
+  ui.ok(`Secret 32-char baru didapatkan (${newSecret.length} char)`);
+
+  ui.step('13', 'Klik Berikutnya & Verifikasi TOTP dari secret baru...');
+  const nextBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
+    scope.locator('button, [role="button"]').filter({ hasText: /berikutnya|next/i })
+  );
+  if (!nextBtn) {
+    throw new Error('Tombol Berikutnya (Next) pada setup authenticator tidak ditemukan.');
+  }
+  await nextBtn.locator.click();
+  await page.waitForTimeout(1500);
+
+  // Masukkan OTP dari 32-secret baru
+  const newOtpObj = generateTOTP(newSecret, 30, 6, googleClockOffsetMs);
+  ui.ok(`Generate OTP dari secret baru: ${newOtpObj.otp} (sisa ${newOtpObj.remaining}s)`);
+
+  const otpInput = page.locator('input[type="text"], input[type="tel"]').first();
+  await otpInput.waitFor({ state: 'visible', timeout: 10000 });
+  await otpInput.fill(newOtpObj.otp);
+  await page.waitForTimeout(500);
+
+  const verifyBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
+    scope.locator('button, [role="button"]').filter({ hasText: /verifikasi|verify|selesai|done/i })
+  );
+  if (verifyBtn) {
+    await verifyBtn.locator.click();
+  } else {
+    await otpInput.press('Enter');
+  }
+  await page.waitForTimeout(4000);
+  ui.ok('Google Authenticator berhasil diubah dan diverifikasi!');
+
+  // Simpan hasil ke berhasil.txt
+  saveBerhasilResult(email, NEW_PASSWORD, newSecret);
+}
+
+// ============================================================================
+// PROCESS ACCOUNT: LOGIN, CHANGE PASSWORD & ROTATE AUTHENTICATOR
 // ============================================================================
 async function processAccount(account, index, total, stats) {
   const accountStart = Date.now();
@@ -1017,7 +1179,7 @@ async function processAccount(account, index, total, stats) {
       await page.waitForTimeout(3000);
     }
 
-    // 4. Deteksi re-auth / verifikasi tambahan sebelum ubah sandi (sandi lama / TOTP)
+    // 4. Deteksi re-auth / verifikasi tambahan sebelum ubah sandi
     currentStep = 'Langkah 6: Verifikasi Re-Auth Ganti Sandi';
     ui.step('06', 'Memeriksa apakah Google meminta verifikasi re-auth password/TOTP...');
     const pwdSelector =
@@ -1066,10 +1228,6 @@ async function processAccount(account, index, total, stats) {
     let confirmPwdInput = null;
 
     for (let t = 0; t < 20; t++) {
-      const allPasswordInp = await findVisibleLocatorInAllFrames(page, (scope) =>
-        scope.locator('input[type="password"]')
-      );
-      // Biasanya halaman ganti sandi punya 2 field password: New password & Confirm password
       const scopes = [page, ...page.frames()];
       for (const scope of scopes) {
         const inputs = scope.locator('input[type="password"]');
@@ -1079,7 +1237,6 @@ async function processAccount(account, index, total, stats) {
           confirmPwdInput = inputs.nth(1);
           break;
         } else if (count === 1) {
-          // Cek berdasarkan atribut name / placeholder / aria-label
           const inp = inputs.nth(0);
           const nameAttr = await inp.getAttribute('name').catch(() => '');
           const labelAttr = await inp.getAttribute('aria-label').catch(() => '');
@@ -1111,7 +1268,7 @@ async function processAccount(account, index, total, stats) {
     await page.waitForTimeout(600);
     ui.ok('Password baru berhasil diisi pada kedua kolom.');
 
-    // 6. Klik Ubah Sandi / Change password / Simpan
+    // 6. Klik Ubah Sandi / Change password
     currentStep = 'Langkah 8: Klik Ubah Sandi';
     ui.step('08', 'Mengklik tombol "Ubah sandi" / "Change password"...');
 
@@ -1140,8 +1297,12 @@ async function processAccount(account, index, total, stats) {
       ui.ok('Password berhasil diubah menjadi impura123456!');
     }
 
+    // 7. Lanjut mengubah Google Authenticator
+    const activeEmail = useWebsiteTab ? await getEmail() : parsedAccount.email;
+    await rotateAuthenticator(page, getPassword, getOtp, () => googleClockOffsetMs, activeEmail);
+
     stats.success += 1;
-    ui.accountDone(index, total, true, Date.now() - accountStart, 'Sandi Diubah ke impura123456');
+    ui.accountDone(index, total, true, Date.now() - accountStart, 'Sandi & Authen Berhasil Diubah');
   } catch (err) {
     stats.failed += 1;
     ui.fail(`Error ${accountLabel}: ${err.message}`);
