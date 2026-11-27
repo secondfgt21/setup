@@ -5,10 +5,11 @@
   "main": "server.mjs",
   "scripts": {
     "dev": "node server.mjs",
-    "build": "node --check server.mjs && node --check bot.mjs && node --check bot2.mjs",
+    "build": "node --check server.mjs && node --check bot.mjs && node --check bot1.mjs && node --check bot2.mjs",
     "start": "node server.mjs",
-    "lint": "node --check server.mjs && node --check bot.mjs && node --check bot2.mjs",
+    "lint": "node --check server.mjs && node --check bot.mjs && node --check bot1.mjs && node --check bot2.mjs",
     "bot": "node bot.mjs",
+    "bot1": "node bot1.mjs",
     "bot2": "node bot2.mjs",
     "test": "echo \"Error: no test specified\" && exit 1"
   },

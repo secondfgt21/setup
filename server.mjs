@@ -9,7 +9,7 @@ const ROOT_DIR = process.cwd();
 
 const MANAGED_FILES = new Set(['accounts.json', 'emails.txt', 'live.txt', 'die.txt']);
 const EDITABLE_FILES = new Set(['accounts.json', 'emails.txt']);
-const ALLOWED_SCRIPTS = new Set(['bot.mjs', 'bot2.mjs']);
+const ALLOWED_SCRIPTS = new Set(['bot.mjs', 'bot1.mjs', 'bot2.mjs']);
 
 let activeChild = null;
 let activeScript = null;
@@ -98,14 +98,15 @@ function renderHtml() {
 </head>
 <body>
   <h1>gpay-closer</h1>
-  <div class="muted">Playwright Core automation runner for <code>bot.mjs</code> (Payments Profile &amp; Family Closer) and <code>bot2.mjs</code> (Email Checker).</div>
+  <div class="muted">Playwright Core automation runner for <code>bot.mjs</code> (Payments Profile &amp; Family Closer), <code>bot1.mjs</code> (Password Changer), and <code>bot2.mjs</code> (Email Checker).</div>
 
   <div id="chromiumWarn" class="warn" style="display:none;">
     Chromium binary not detected in standard paths. Set <code>CHROMIUM_PATH</code> in your environment before running the bots.
   </div>
 
   <div class="row">
-    <button id="runBot1" onclick="startBot('bot.mjs')">Run bot.mjs</button>
+    <button id="runBot" onclick="startBot('bot.mjs')">Run bot.mjs</button>
+    <button id="runBot1" onclick="startBot('bot1.mjs')">Run bot1.mjs</button>
     <button id="runBot2" onclick="startBot('bot2.mjs')">Run bot2.mjs</button>
     <button id="stopBtn" class="stop" onclick="stopBot()" disabled>Stop</button>
     <span class="badge" id="statusBadge">Idle</span>
