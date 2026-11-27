@@ -889,9 +889,11 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
       continue;
     }
 
-    const inlineTotp = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator(totpReAuthSelector));
-    if (inlineTotp) {
-      ui.sub('Re-auth TOTP sebelum ubah Authenticator...');
+    const challengeVisible = await findVisibleLocatorInAllFrames(page, (scope) =>
+      scope.locator(`${totpReAuthSelector}, button:has-text("Cara lainnya"), a:has-text("Cara lainnya"), button:has-text("Coba cara lain"), div:has-text("Periksa")`)
+    );
+    if (challengeVisible || page.url().includes('/challenge/')) {
+      ui.sub('Verifikasi re-auth terdeteksi (Device prompt / TOTP)...');
       await submitTotpChallenge(page, getOtp, googleClockOffsetFn);
       await page.waitForTimeout(2500);
       continue;
