@@ -892,7 +892,7 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
     const inlineTotp = await findVisibleLocatorInAllFrames(page, (scope) => scope.locator(totpReAuthSelector));
     if (inlineTotp) {
       ui.sub('Re-auth TOTP sebelum ubah Authenticator...');
-      await submitTotpChallenge(page, getOtp, () => googleClockOffsetMs);
+      await submitTotpChallenge(page, getOtp, googleClockOffsetFn);
       await page.waitForTimeout(2500);
       continue;
     }
@@ -982,7 +982,8 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
   await page.waitForTimeout(1500);
 
   // Masukkan OTP dari 32-secret baru
-  const newOtpObj = generateTOTP(newSecret, 30, 6, googleClockOffsetMs);
+  const clockOffset = googleClockOffsetFn ? googleClockOffsetFn() : 0;
+  const newOtpObj = generateTOTP(newSecret, 30, 6, clockOffset);
   ui.ok(`Generate OTP dari secret baru: ${newOtpObj.otp} (sisa ${newOtpObj.remaining}s)`);
 
   const otpInput = page.locator('input[type="text"], input[type="tel"]').first();
