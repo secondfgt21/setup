@@ -737,7 +737,7 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
   const totpInputSelector =
     'input[name="totpPin"], #totpPin, input[type="tel"][autocomplete="one-time-code"], input[aria-label*="code" i], input[aria-label*="kode" i]';
   const tryAnotherSelector =
-    'button:has-text("Coba cara lain"), button:has-text("Cara lainnya"), button:has-text("Try another way"), button:has-text("More ways"), a:has-text("Cara lainnya"), [role="button"]:has-text("Coba cara lain"), [role="button"]:has-text("Cara lainnya"), [role="button"]:has-text("Try another way")';
+    'button:has-text("Coba cara lain"), button:has-text("Cara lainnya"), button:has-text("Cara lainnya untuk memverifikasi"), button:has-text("Try another way"), button:has-text("More ways"), a:has-text("Cara lainnya"), a:has-text("Cara lainnya untuk memverifikasi"), [role="button"]:has-text("Coba cara lain"), [role="button"]:has-text("Cara lainnya"), [role="button"]:has-text("Cara lainnya untuk memverifikasi"), [role="button"]:has-text("Try another way")';
 
   const closeWatcher = new Promise((resolve) => {
     if (page.isClosed()) return resolve('closed');
@@ -1294,8 +1294,18 @@ async function processAccount(account, index, total, stats) {
         });
       }
       await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-      await page.waitForTimeout(5000);
-      ui.ok('Password berhasil diubah menjadi impura123456!');
+      await page.waitForTimeout(3000);
+
+      const alreadyUsedRegex = /anda sudah menggunakan sandi ini baru-baru ini|you['’]ve already used this password recently|pilih yang lain|choose another/i;
+      const hasAlreadyUsed = await findVisibleLocatorInAllFrames(page, (scope) =>
+        scope.getByText(alreadyUsedRegex)
+      );
+
+      if (hasAlreadyUsed) {
+        ui.info('Sandi sudah pernah digunakan sebelumnya — lanjut langsung ke Authenticator...');
+      } else {
+        ui.ok('Password berhasil diubah menjadi impura123456!');
+      }
     }
 
     // 7. Lanjut mengubah Google Authenticator
