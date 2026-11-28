@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
+import readline from 'node:readline';
 
 if (process.platform === 'android') {
   Object.defineProperty(process, 'platform', {
@@ -922,94 +923,63 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
   await changeAppBtn.locator.click();
   await page.waitForTimeout(2000);
 
-  ui.step('11', 'Mengklik "Tidak dapat memindai kode" / "Can\'t scan it"...');
-  let cantScanBtn = null;
-  for (let t = 0; t < 15; t++) {
-    cantScanBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
-      scope.locator('button, [role="button"], a').filter({
-        hasText: /tidak dapat memindai|tidak dapat memindainya|can['’]t scan it|can['’]t scan code/i,
-      })
-    );
-    if (cantScanBtn) break;
-    await page.waitForTimeout(1000);
+  ui.step('11', 'Menampilkan QR Code Authenticator & Menunggu Input Pengguna...');
+  const qrShotPath = path.resolve(process.cwd(), 'qr-code.png');
+  await page.screenshot({ path: qrShotPath, fullPage: true }).catch(() => {});
+  ui.ok(`Screenshot QR Code tersimpan di: ${qrShotPath}`);
+
+  if (SAVE_ERROR_TO_SDCARD) {
+    const downloadDir = resolveDownloadDir();
+    if (downloadDir) {
+      const publicQrShot = path.join(downloadDir, 'qr-code.png');
+      fs.copyFileSync(qrShotPath, publicQrShot);
+      ui.ok(`Tersalin ke Download HP: ${publicQrShot}`);
+    }
   }
 
-  if (!cantScanBtn) {
-    throw new Error('Tombol "Tidak dapat memindai kode" (Can\'t scan it) tidak ditemukan.');
-  }
+  ui.warn('========================================================================');
+  ui.warn(' SILAKAN SCAN QR CODE PADA SCREENSHOT (qr-code.png) DI HP ANDA ');
+  ui.warn('========================================================================');
 
-  await cantScanBtn.locator.scrollIntoViewIfNeeded().catch(() => {});
-  await cantScanBtn.locator.click();
-  await page.waitForTimeout(2000);
+  const userInput = await promptUserForOtpOrSecret(
+    '\n👉 Masukkan 6-digit kode verifikasi (atau 32-char secret) dari Google Authenticator baru: '
+  );
 
   let newSecret = '';
-  for (let t = 0; t < 15; t++) {
-    newSecret = await page.evaluate(() => {
-      for (const el of document.querySelectorAll('input, textarea, code, kbd, pre')) {
-        const val = String(el.value || el.innerText || '').replace(/[\s=-]+/g, '').toUpperCase();
-        if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(val)) {
-          return val;
-        }
-      }
+  let otpCode = '';
+  const cleanedInput = userInput.replace(/[\s=-]+/g, '').toUpperCase();
 
-      const forbiddenWords = [
-        'HARI', 'YANG', 'LALU', 'BULAN', 'TAHUN', 'JAM', 'MENIT', 'DETIK',
-        'YESTERDAY', 'DAYS', 'AGO', 'WEEKS', 'MONTHS', 'YEARS',
-        'ACCOUNT', 'SECURITY', 'EMAIL', 'GOOGLE', 'PASSWORD', 'SANDI',
-        'MASUK', 'LOGIN', 'ANDA', 'UNTUK', 'DARI', 'INI', 'ITU', 'KODE',
-        'KUNCI', 'PENYIAPAN', 'APLIKASI', 'PENGAUTENTIKASI', 'BAHKAN',
-        'ALAMAT', 'TIDAK', 'PERLU', 'SPASI', 'PASTIKAN', 'BERBASIS', 'WAKTU',
-        'DIPILIH', 'KETUK', 'TAMBAHKAN', 'UNTUK', 'MENYELESAIKAN'
-      ];
-
-      const els = document.querySelectorAll('[role="dialog"] span, [role="dialog"] div, [role="dialog"] p, span, div');
-      for (const el of els) {
-        const txt = (el.innerText || '').trim();
-        if (txt.includes(' ') && txt.length >= 16 && txt.length <= 60) {
-          const cleaned = txt.replace(/[\s=-]+/g, '').toUpperCase();
-          if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(cleaned)) {
-            const hasForbidden = forbiddenWords.some(w => cleaned.includes(w) || txt.toUpperCase().includes(w));
-            if (!hasForbidden) {
-              return cleaned;
-            }
-          }
-        }
-      }
-      return '';
-    });
-    if (newSecret && newSecret.length >= 16) break;
-    await page.waitForTimeout(1000);
+  if (/^\d{6}$/.test(cleanedInput)) {
+    otpCode = cleanedInput;
+    newSecret = 'MANUAL_SCANNED_SECRET';
+  } else if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(cleanedInput)) {
+    newSecret = cleanedInput;
+    const clockOffset = googleClockOffsetFn ? googleClockOffsetFn() : 0;
+    let newOtpObj = generateTOTP(newSecret, 30, 6, clockOffset);
+    if (newOtpObj.remaining <= 5) {
+      ui.sub(`Sisa waktu OTP baru terlalu singkat (${newOtpObj.remaining}s), menunggu siklus baru...`);
+      await ui.countdown((newOtpObj.remaining + 1) * 1000, 'Siklus OTP baru');
+      newOtpObj = generateTOTP(newSecret, 30, 6, clockOffset);
+    }
+    otpCode = newOtpObj.otp;
+  } else {
+    throw new Error(`Input tidak valid: "${userInput}" (harus 6-digit OTP atau 32-char secret Base32).`);
   }
 
-  newSecret = extractBase32Secret(newSecret);
-  if (!newSecret || newSecret.length < 16) {
-    throw new Error('Gagal mengekstrak 32-karakter Base32 secret code baru dari halaman Google Authenticator.');
-  }
-  ui.step('12', `Menyalin 32-karakter Base32 secret code baru (${newSecret})`);
+  ui.step('12', `Mengirim kode verifikasi (${otpCode})...`);
 
-  ui.step('13', 'Klik Berikutnya & Verifikasi TOTP dari secret baru...');
+  // Klik Berikutnya (Next) pada modal QR Code
   const nextBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
     scope.locator('button, [role="button"]').filter({ hasText: /berikutnya|next/i })
   );
-  if (!nextBtn) {
-    throw new Error('Tombol Berikutnya (Next) pada setup authenticator tidak ditemukan.');
+  if (nextBtn) {
+    await nextBtn.locator.click().catch(() => {});
+    await page.waitForTimeout(2000);
   }
-  await nextBtn.locator.click();
-  await page.waitForTimeout(1500);
-
-  // Masukkan OTP dari 32-secret baru
-  const clockOffset = googleClockOffsetFn ? googleClockOffsetFn() : 0;
-  let newOtpObj = generateTOTP(newSecret, 30, 6, clockOffset);
-  if (newOtpObj.remaining <= 5) {
-    ui.sub(`Sisa waktu OTP baru terlalu singkat (${newOtpObj.remaining}s), menunggu siklus baru...`);
-    await ui.countdown((newOtpObj.remaining + 1) * 1000, 'Siklus OTP baru');
-    newOtpObj = generateTOTP(newSecret, 30, 6, clockOffset);
-  }
-  ui.ok(`Generate OTP dari secret baru: ${newOtpObj.otp} (sisa ${newOtpObj.remaining}s)`);
 
   const otpInput = page.locator('input[type="text"], input[type="tel"]').first();
   await otpInput.waitFor({ state: 'visible', timeout: 10000 });
-  await otpInput.fill(newOtpObj.otp);
+  await otpInput.fill(otpCode);
   await page.waitForTimeout(500);
 
   const verifyBtn = await findVisibleLocatorInAllFrames(page, (scope) =>
@@ -1032,8 +1002,6 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
   }
 
   ui.ok('Google Authenticator berhasil diubah dan diverifikasi!');
-
-  // Simpan hasil ke berhasil.txt
   saveBerhasilResult(email, NEW_PASSWORD, newSecret);
 }
 
