@@ -999,7 +999,12 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
 
   // Masukkan OTP dari 32-secret baru
   const clockOffset = googleClockOffsetFn ? googleClockOffsetFn() : 0;
-  const newOtpObj = generateTOTP(newSecret, 30, 6, clockOffset);
+  let newOtpObj = generateTOTP(newSecret, 30, 6, clockOffset);
+  if (newOtpObj.remaining <= 5) {
+    ui.sub(`Sisa waktu OTP baru terlalu singkat (${newOtpObj.remaining}s), menunggu siklus baru...`);
+    await ui.countdown((newOtpObj.remaining + 1) * 1000, 'Siklus OTP baru');
+    newOtpObj = generateTOTP(newSecret, 30, 6, clockOffset);
+  }
   ui.ok(`Generate OTP dari secret baru: ${newOtpObj.otp} (sisa ${newOtpObj.remaining}s)`);
 
   const otpInput = page.locator('input[type="text"], input[type="tel"]').first();
