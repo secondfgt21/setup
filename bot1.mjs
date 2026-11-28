@@ -945,39 +945,36 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
   let newSecret = '';
   for (let t = 0; t < 15; t++) {
     newSecret = await page.evaluate(() => {
-      for (const inp of document.querySelectorAll('input, textarea')) {
-        const val = String(inp.value || '').replace(/[\s=-]+/g, '').toUpperCase();
+      for (const el of document.querySelectorAll('input, textarea, code, kbd, pre')) {
+        const val = String(el.value || el.innerText || '').replace(/[\s=-]+/g, '').toUpperCase();
         if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(val)) {
           return val;
         }
       }
 
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      let node;
-      while ((node = walker.nextNode())) {
-        const text = node.nodeValue || '';
-        const matches = text.match(/[a-z2-7]{3,6}(?:\s+[a-z2-7]{3,6}){3,10}/gi);
-        if (matches) {
-          for (const m of matches) {
-            const cleaned = m.replace(/[\s=-]+/g, '').toUpperCase();
-            if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(cleaned)) {
+      const forbiddenWords = [
+        'HARI', 'YANG', 'LALU', 'BULAN', 'TAHUN', 'JAM', 'MENIT', 'DETIK',
+        'YESTERDAY', 'DAYS', 'AGO', 'WEEKS', 'MONTHS', 'YEARS',
+        'ACCOUNT', 'SECURITY', 'EMAIL', 'GOOGLE', 'PASSWORD', 'SANDI',
+        'MASUK', 'LOGIN', 'ANDA', 'UNTUK', 'DARI', 'INI', 'ITU', 'KODE',
+        'KUNCI', 'PENYIAPAN', 'APLIKASI', 'PENGAUTENTIKASI', 'BAHKAN',
+        'ALAMAT', 'TIDAK', 'PERLU', 'SPASI', 'PASTIKAN', 'BERBASIS', 'WAKTU',
+        'DIPILIH', 'KETUK', 'TAMBAHKAN', 'UNTUK', 'MENYELESAIKAN'
+      ];
+
+      const els = document.querySelectorAll('[role="dialog"] span, [role="dialog"] div, [role="dialog"] p, span, div');
+      for (const el of els) {
+        const txt = (el.innerText || '').trim();
+        if (txt.includes(' ') && txt.length >= 16 && txt.length <= 60) {
+          const cleaned = txt.replace(/[\s=-]+/g, '').toUpperCase();
+          if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(cleaned)) {
+            const hasForbidden = forbiddenWords.some(w => cleaned.includes(w) || txt.toUpperCase().includes(w));
+            if (!hasForbidden) {
               return cleaned;
             }
           }
         }
       }
-
-      const bodyText = document.body ? document.body.innerText : '';
-      const fallbackMatches = bodyText.match(/[a-z2-7]{3,6}(?:\s+[a-z2-7]{3,6}){3,10}/gi);
-      if (fallbackMatches) {
-        for (const m of fallbackMatches) {
-          const cleaned = m.replace(/[\s=-]+/g, '').toUpperCase();
-          if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(cleaned)) {
-            return cleaned;
-          }
-        }
-      }
-
       return '';
     });
     if (newSecret && newSecret.length >= 16) break;
