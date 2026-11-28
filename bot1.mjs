@@ -855,6 +855,19 @@ async function submitTotpChallenge(page, getOtpFn, getClockOffsetFn) {
   }
 }
 
+async function promptUserForOtpOrSecret(promptMessage) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(promptMessage, (answer) => {
+      rl.close();
+      resolve(String(answer || '').trim());
+    });
+  });
+}
+
 // ============================================================================
 // ROTASI GOOGLE AUTHENTICATOR
 // ============================================================================
