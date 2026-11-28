@@ -947,22 +947,37 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
     newSecret = await page.evaluate(() => {
       for (const inp of document.querySelectorAll('input, textarea')) {
         const val = String(inp.value || '').replace(/[\s=-]+/g, '').toUpperCase();
-        if (/^[A-Z2-7]{16,32}$/.test(val)) {
+        if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(val)) {
           return val;
         }
       }
 
-      const ignoreWords = new Set(['PRIVASI', 'PERSYARATAN', 'BANTUAN', 'TENTANG', 'GOOGLE', 'AKUN', 'SETTINGS', 'TERMS', 'PRIVACY', 'HELP', 'ABOUT']);
-      const els = document.querySelectorAll('code, span, div, p, strong, b');
-      for (const el of els) {
-        const txt = (el.innerText || '').trim();
-        const cleaned = txt.replace(/[\s=-]+/g, '').toUpperCase();
-        if (/^[A-Z2-7]{16,32}$/.test(cleaned)) {
-          if (!ignoreWords.has(cleaned)) {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        const text = node.nodeValue || '';
+        const matches = text.match(/[a-z2-7]{3,6}(?:\s+[a-z2-7]{3,6}){3,10}/gi);
+        if (matches) {
+          for (const m of matches) {
+            const cleaned = m.replace(/[\s=-]+/g, '').toUpperCase();
+            if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(cleaned)) {
+              return cleaned;
+            }
+          }
+        }
+      }
+
+      const bodyText = document.body ? document.body.innerText : '';
+      const fallbackMatches = bodyText.match(/[a-z2-7]{3,6}(?:\s+[a-z2-7]{3,6}){3,10}/gi);
+      if (fallbackMatches) {
+        for (const m of fallbackMatches) {
+          const cleaned = m.replace(/[\s=-]+/g, '').toUpperCase();
+          if (/^(?=.*[2-7])[A-Z2-7]{16,32}$/.test(cleaned)) {
             return cleaned;
           }
         }
       }
+
       return '';
     });
     if (newSecret && newSecret.length >= 16) break;
@@ -1004,6 +1019,16 @@ async function rotateAuthenticator(page, getPassword, getOtp, googleClockOffsetF
     await otpInput.press('Enter');
   }
   await page.waitForTimeout(4000);
+
+  const authErrorRegex = /kode salah|wrong code|tidak valid|invalid code|coba lagi|try again|terjadi kesalahan|an error occurred/i;
+  const hasAuthError = await findVisibleLocatorInAllFrames(page, (scope) =>
+    scope.getByText(authErrorRegex)
+  );
+  if (hasAuthError) {
+    const errText = await hasAuthError.locator.innerText().catch(() => 'Kode verifikasi ditolak');
+    throw new Error(`Google menolak verifikasi Authenticator baru: "${errText.trim()}"`);
+  }
+
   ui.ok('Google Authenticator berhasil diubah dan diverifikasi!');
 
   // Simpan hasil ke berhasil.txt
@@ -1308,6 +1333,14 @@ async function processAccount(account, index, total, stats) {
       if (hasAlreadyUsed) {
         ui.info('Sandi sudah pernah digunakan sebelumnya — lanjut langsung ke Authenticator...');
       } else {
+        const passwordErrorRegex = /sandi tidak cocok|password doesn['’]t match|minimal|minimum|harus|must|coba lagi|try again|terjadi kesalahan|an error occurred|salah|wrong/i;
+        const hasPwdError = await findVisibleLocatorInAllFrames(page, (scope) =>
+          scope.getByText(passwordErrorRegex)
+        );
+        if (hasPwdError) {
+          const errText = await hasPwdError.locator.innerText().catch(() => 'Gagal mengubah sandi');
+          throw new Error(`Google menolak perubahan sandi: "${errText.trim()}"`);
+        }
         ui.ok('Password berhasil diubah menjadi impura123456!');
       }
     }
